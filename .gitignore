@@ -1,0 +1,37 @@
+# --- Data & Models (Large Files) ---
+data/
+
+# --- Log Files ---
+logs/
+*.log
+
+# --- Python Environment & Caches ---
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.ipynb_checkpoints/
+
+# --- Virtual Environments ---
+venv/
+.venv/
+env/
+ENV/
+
+# --- Secrets & Environment Variables ---
+.env
+src/gateway/.env
+
+# --- IDEs & Editors ---
+.vscode/
+.idea/
+.claude/
+.agents/
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.swp
+
+# --- Streamlit Local Configurations ---
+.streamlit/

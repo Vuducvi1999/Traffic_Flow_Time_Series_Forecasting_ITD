@@ -1,0 +1,1061 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>iTMS Traffic Volume Forecasting Dashboard</title>
+    <!-- Google Fonts -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <!-- Chart.js CDN -->
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <!-- Lucide Icons -->
+    <script src="https://unpkg.com/lucide@latest"></script>
+    <style>
+        :root {
+            --bg-color: #030712;
+            --card-bg: rgba(17, 24, 39, 0.7);
+            --border-color: rgba(255, 255, 255, 0.08);
+            --accent-cyan: #06b6d4;
+            --accent-purple: #a855f7;
+            --accent-emerald: #10b981;
+            --text-primary: #f3f4f6;
+            --text-secondary: #9ca3af;
+            --glow-cyan: rgba(6, 182, 212, 0.15);
+            --glow-purple: rgba(168, 85, 247, 0.15);
+        }
+
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }
+
+        body {
+            font-family: 'Inter', sans-serif;
+            background-color: var(--bg-color);
+            background-image: 
+                radial-gradient(circle at 10% 20%, rgba(168, 85, 247, 0.05) 0%, transparent 40%),
+                radial-gradient(circle at 90% 80%, rgba(6, 182, 212, 0.05) 0%, transparent 40%);
+            color: var(--text-primary);
+            min-height: 100vh;
+            padding: 2rem;
+            line-height: 1.5;
+        }
+
+        .container {
+            max-width: 1400px;
+            margin: 0 auto;
+            display: flex;
+            flex-direction: column;
+            gap: 2rem;
+        }
+
+        /* Error/CORS Message Overlay */
+        #cors-warning {
+            display: none;
+            background: rgba(239, 68, 68, 0.15);
+            border: 1px solid rgba(239, 68, 68, 0.3);
+            border-radius: 12px;
+            padding: 1.5rem;
+            margin-bottom: 1rem;
+            backdrop-filter: blur(8px);
+        }
+        #cors-warning h3 {
+            color: #ef4444;
+            margin-bottom: 0.5rem;
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+        }
+
+        /* Header Style */
+        header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            border-bottom: 1px solid var(--border-color);
+            padding-bottom: 1.5rem;
+            flex-wrap: wrap;
+            gap: 1.5rem;
+        }
+
+        .header-title h1 {
+            font-size: 1.8rem;
+            font-weight: 700;
+            background: linear-gradient(135deg, #fff 30%, var(--text-secondary) 100%);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            letter-spacing: -0.025em;
+        }
+
+        .header-title p {
+            color: var(--text-secondary);
+            font-size: 0.9rem;
+            margin-top: 0.25rem;
+        }
+
+        .header-controls {
+            display: flex;
+            gap: 1rem;
+            align-items: center;
+            flex-wrap: wrap;
+        }
+
+        /* Toggle Container styling */
+        .toggle-container {
+            display: flex;
+            background: rgba(255, 255, 255, 0.03);
+            border: 1px solid var(--border-color);
+            padding: 0.25rem;
+            border-radius: 12px;
+            backdrop-filter: blur(12px);
+        }
+
+        .toggle-btn {
+            background: transparent;
+            border: none;
+            color: var(--text-secondary);
+            padding: 0.5rem 1.25rem;
+            border-radius: 8px;
+            font-family: inherit;
+            font-size: 0.85rem;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.2s ease;
+            outline: none;
+        }
+
+        .toggle-btn.active {
+            background: rgba(6, 182, 212, 0.12);
+            color: var(--accent-cyan);
+            box-shadow: inset 0 1px 0 rgba(255,255,255,0.05);
+            border: 1px solid rgba(6, 182, 212, 0.2);
+        }
+
+        .selector-box {
+            display: flex;
+            align-items: center;
+            gap: 0.75rem;
+            background: var(--card-bg);
+            border: 1px solid var(--border-color);
+            padding: 0.5rem 1rem;
+            border-radius: 12px;
+            backdrop-filter: blur(12px);
+        }
+
+        .selector-box label {
+            font-size: 0.85rem;
+            font-weight: 500;
+            color: var(--text-secondary);
+        }
+
+        select {
+            background: #0b0f19;
+            color: var(--text-primary);
+            border: 1px solid var(--border-color);
+            padding: 0.5rem 1.5rem 0.5rem 0.75rem;
+            border-radius: 8px;
+            font-family: inherit;
+            font-size: 0.9rem;
+            font-weight: 600;
+            cursor: pointer;
+            outline: none;
+            transition: all 0.2s ease;
+        }
+
+        select:focus {
+            border-color: var(--accent-cyan);
+            box-shadow: 0 0 10px rgba(6, 182, 212, 0.2);
+        }
+
+        /* Grid Layout */
+        .dashboard-grid {
+            display: grid;
+            grid-template-columns: 350px 1fr;
+            gap: 2rem;
+        }
+
+        @media (max-width: 1024px) {
+            .dashboard-grid {
+                grid-template-columns: 1fr;
+            }
+        }
+
+        /* Sidebar Info */
+        .sidebar {
+            display: flex;
+            flex-direction: column;
+            gap: 2rem;
+        }
+
+        .card {
+            background: var(--card-bg);
+            border: 1px solid var(--border-color);
+            border-radius: 16px;
+            padding: 1.5rem;
+            backdrop-filter: blur(12px);
+            box-shadow: 0 10px 30px rgba(0, 0, 0, 0.2);
+            transition: transform 0.3s ease, border-color 0.3s ease;
+        }
+
+        .card:hover {
+            border-color: rgba(255, 255, 255, 0.15);
+        }
+
+        .card-title {
+            font-size: 0.95rem;
+            font-weight: 600;
+            color: var(--text-secondary);
+            margin-bottom: 1.25rem;
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+        }
+
+        /* Metrics grid */
+        .metrics-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 1rem;
+        }
+
+        .metric-item {
+            background: rgba(255, 255, 255, 0.02);
+            border: 1px solid var(--border-color);
+            padding: 1rem;
+            border-radius: 12px;
+            display: flex;
+            flex-direction: column;
+            gap: 0.25rem;
+        }
+
+        .metric-value {
+            font-size: 1.4rem;
+            font-weight: 700;
+            color: var(--text-primary);
+        }
+
+        .metric-label {
+            font-size: 0.75rem;
+            color: var(--text-secondary);
+            font-weight: 500;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+        }
+
+        /* Forecast Horizons Cards */
+        .horizon-list {
+            display: flex;
+            flex-direction: column;
+            gap: 1rem;
+        }
+
+        .horizon-card {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            background: rgba(255, 255, 255, 0.02);
+            border: 1px solid var(--border-color);
+            padding: 1rem 1.25rem;
+            border-radius: 12px;
+            position: relative;
+            overflow: hidden;
+            transition: all 0.3s ease;
+        }
+
+        .horizon-card::before {
+            content: '';
+            position: absolute;
+            left: 0;
+            top: 0;
+            bottom: 0;
+            width: 4px;
+            background: var(--accent-cyan);
+        }
+
+        .horizon-card.purple::before {
+            background: var(--accent-purple);
+        }
+
+        .horizon-card:hover {
+            background: rgba(255, 255, 255, 0.04);
+            transform: translateX(4px);
+        }
+
+        .horizon-info {
+            display: flex;
+            flex-direction: column;
+            gap: 0.15rem;
+        }
+
+        .horizon-label {
+            font-size: 0.85rem;
+            font-weight: 600;
+            color: var(--text-secondary);
+        }
+
+        .horizon-desc {
+            font-size: 0.75rem;
+            color: rgba(156, 163, 175, 0.7);
+        }
+
+        .horizon-value {
+            font-size: 1.6rem;
+            font-weight: 800;
+            font-family: monospace;
+            background: linear-gradient(135deg, #fff, #9ca3af);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+        }
+
+        /* Main Content Area */
+        .main-content {
+            display: flex;
+            flex-direction: column;
+            gap: 2rem;
+        }
+
+        /* Chart Area */
+        .chart-container {
+            position: relative;
+            height: 400px;
+            width: 100%;
+        }
+
+        /* Quick weather indicator */
+        .weather-panel {
+            display: flex;
+            gap: 1.5rem;
+            background: var(--card-bg);
+            border: 1px solid var(--border-color);
+            border-radius: 16px;
+            padding: 1.25rem 1.5rem;
+            backdrop-filter: blur(12px);
+            align-items: center;
+        }
+
+        .weather-title {
+            font-size: 0.9rem;
+            font-weight: 600;
+            color: var(--text-secondary);
+            border-right: 1px solid var(--border-color);
+            padding-right: 1.5rem;
+            margin-right: 0.5rem;
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+        }
+
+        .weather-items {
+            display: flex;
+            gap: 2rem;
+            flex-grow: 1;
+            justify-content: space-around;
+        }
+
+        .weather-item {
+            display: flex;
+            align-items: center;
+            gap: 0.75rem;
+        }
+
+        .weather-icon-wrapper {
+            background: rgba(255, 255, 255, 0.03);
+            border: 1px solid var(--border-color);
+            border-radius: 8px;
+            padding: 0.5rem;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+
+        .weather-item-info {
+            display: flex;
+            flex-direction: column;
+        }
+
+        .weather-item-val {
+            font-size: 1rem;
+            font-weight: 700;
+        }
+
+        .weather-item-lbl {
+            font-size: 0.7rem;
+            color: var(--text-secondary);
+            text-transform: uppercase;
+        }
+    </style>
+</head>
+<body>
+
+<div class="container">
+    <!-- CORS Warning banner if loaded locally via file:// -->
+    <div id="cors-warning">
+        <h3><i data-lucide="alert-triangle"></i> Local File Execution Warning (CORS)</h3>
+        <p>Because modern browsers block fetching file paths directly due to security restrictions (CORS), the dashboard could not load the data automatically. Vui lòng chạy lệnh sau trong thư mục dự án và mở đường dẫn tương ứng:</p>
+        <code style="display: block; background: #000; padding: 0.75rem; border-radius: 6px; margin: 0.75rem 0; font-family: monospace; color: var(--accent-cyan);">python -m http.server 8000</code>
+        <p>Sau đó truy cập: <a href="http://localhost:8000/dashboard.html" style="color: var(--accent-cyan); text-decoration: underline;">http://localhost:8000/dashboard.html</a></p>
+    </div>
+
+    <header>
+        <div class="header-title">
+            <h1>iTMS Traffic volume forecasting</h1>
+            <p>Dự báo lưu lượng xe theo mô hình SARIMAX ngoại sinh (Lag-1 Traffic & Weather)</p>
+        </div>
+        
+        <div class="header-controls">
+            <!-- Mode Toggle: Validation Overlay vs Future Forecast -->
+            <div class="toggle-container">
+                <button class="toggle-btn active" id="btn-validation">Định giá / Đối chiếu</button>
+                <button class="toggle-btn" id="btn-future">Dự báo tương lai</button>
+            </div>
+
+            <!-- Simulation Toggle (Validation Mode Only) -->
+            <button class="toggle-btn" id="btn-simulate" style="display: flex; align-items: center; gap: 0.5rem; background: rgba(16, 185, 129, 0.15); color: var(--accent-emerald); border: 1px solid rgba(16, 185, 129, 0.3);">
+                <i data-lucide="play" style="width: 14px; height: 14px;"></i> Chạy Mô phỏng
+            </button>
+            
+            <div class="selector-box">
+                <label for="horizon-select">Thời gian:</label>
+                <select id="horizon-select">
+                    <option value="1">1 phút</option>
+                    <option value="5">5 phút</option>
+                    <option value="15">15 phút</option>
+                    <option value="30">30 phút</option>
+                    <option value="60">60 phút</option>
+                    <option value="120">120 phút</option>
+                    <option value="all" selected>Tất cả</option>
+                </select>
+            </div>
+
+            <!-- Device Selector -->
+            <div class="selector-box">
+                <label for="device-select">Trạm VDS:</label>
+                <select id="device-select">
+                    <option value="" disabled selected>Đang tải danh sách...</option>
+                </select>
+            </div>
+        </div>
+    </header>
+
+    <div class="dashboard-grid">
+        <!-- Sidebar -->
+        <div class="sidebar">
+            <!-- Model Performance Metrics Card -->
+            <div class="card">
+                <div class="card-title">
+                    <i data-lucide="bar-chart-2" style="color: var(--accent-cyan);"></i>
+                    Hiệu năng mô hình (SARIMAX)
+                </div>
+                <div class="metrics-grid">
+                    <div class="metric-item">
+                        <div class="metric-value" id="val-mape">-</div>
+                        <div class="metric-label">MAPE</div>
+                    </div>
+                    <div class="metric-item">
+                        <div class="metric-value" id="val-r2">-</div>
+                        <div class="metric-label">R²</div>
+                    </div>
+                    <div class="metric-item">
+                        <div class="metric-value" id="val-mae">-</div>
+                        <div class="metric-label">MAE (xe)</div>
+                    </div>
+                    <div class="metric-item">
+                        <div class="metric-value" id="val-rmse">-</div>
+                        <div class="metric-label">RMSE</div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Forecast Horizons Cards -->
+            <div class="card">
+                <div class="card-title">
+                    <i data-lucide="clock" style="color: var(--accent-purple);"></i>
+                    Dự báo theo các mốc thời gian
+                </div>
+                <div class="horizon-list">
+                    <div class="horizon-card">
+                        <div class="horizon-info">
+                            <span class="horizon-label">Dự báo 1 Phút</span>
+                            <span class="horizon-desc">Hành vi tức thời gần nhất</span>
+                        </div>
+                        <div class="horizon-value" id="horizon-1m">-</div>
+                    </div>
+                    <div class="horizon-card purple">
+                        <div class="horizon-info">
+                            <span class="horizon-label">Dự báo 5 Phút</span>
+                            <span class="horizon-desc">Diễn biến chu kỳ ngắn</span>
+                        </div>
+                        <div class="horizon-value" id="horizon-5m">-</div>
+                    </div>
+                    <div class="horizon-card">
+                        <div class="horizon-info">
+                            <span class="horizon-label">Dự báo 15 Phút</span>
+                            <span class="horizon-desc">Dòng giao thông trung hạn</span>
+                        </div>
+                        <div class="horizon-value" id="horizon-15m">-</div>
+                    </div>
+                    <div class="horizon-card purple">
+                        <div class="horizon-info">
+                            <span class="horizon-label">Dự báo 30 Phút</span>
+                            <span class="horizon-desc">Xu hướng đón đầu cao điểm</span>
+                        </div>
+                        <div class="horizon-value" id="horizon-30m">-</div>
+                    </div>
+                    <div class="horizon-card">
+                        <div class="horizon-info">
+                            <span class="horizon-label">Dự báo 60 Phút</span>
+                            <span class="horizon-desc">Dự báo quy mô chiến lược</span>
+                        </div>
+                        <div class="horizon-value" id="horizon-60m">-</div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Main Panel -->
+        <div class="main-content">
+            <!-- Weather panel representing the latest city-wide measurements -->
+            <div class="weather-panel">
+                <div class="weather-title">
+                    <i data-lucide="cloud-sun" style="color: var(--accent-cyan);"></i>
+                    Thời tiết mạng lưới (Mới nhất)
+                </div>
+                <div class="weather-items">
+                    <div class="weather-item">
+                        <div class="weather-icon-wrapper">
+                            <i data-lucide="cloud-rain" style="color: #60a5fa;"></i>
+                        </div>
+                        <div class="weather-item-info">
+                            <span class="weather-item-val" id="weather-rain">- mm</span>
+                            <span class="weather-item-lbl">Lượng mưa</span>
+                        </div>
+                    </div>
+                    <div class="weather-item">
+                        <div class="weather-icon-wrapper">
+                            <i data-lucide="thermometer" style="color: #f87171;"></i>
+                        </div>
+                        <div class="weather-item-info">
+                            <span class="weather-item-val" id="weather-temp">- °C</span>
+                            <span class="weather-item-lbl">Nhiệt độ</span>
+                        </div>
+                    </div>
+                    <div class="weather-item">
+                        <div class="weather-icon-wrapper">
+                            <i data-lucide="droplets" style="color: #34d399;"></i>
+                        </div>
+                        <div class="weather-item-info">
+                            <span class="weather-item-val" id="weather-hum">- %</span>
+                            <span class="weather-item-lbl">Độ ẩm</span>
+                        </div>
+                    </div>
+                    <div class="weather-item">
+                        <div class="weather-icon-wrapper">
+                            <i data-lucide="eye" style="color: #fbbf24;"></i>
+                        </div>
+                        <div class="weather-item-info">
+                            <span class="weather-item-val" id="weather-vis">- km</span>
+                            <span class="weather-item-lbl">Tầm nhìn</span>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Chart Card -->
+            <div class="card" style="flex-grow: 1;">
+                <div class="card-title">
+                    <i data-lucide="trending-up" style="color: var(--accent-cyan);"></i>
+                    <span id="chart-title-text">Xu hướng đối chiếu thực tế vs Dự báo (Tập kiểm thử)</span>
+                </div>
+                <div class="chart-container">
+                    <canvas id="trafficChart"></canvas>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<script>
+    let globalData = null;
+    let chartInstance = null;
+    let currentMode = 'validation'; // Default to validation/overlay mode
+    
+    // Simulation state
+    let simulationInterval = null;
+    let isSimulating = false;
+
+    // Detect if page is running from file:// protocol
+    if (window.location.protocol === 'file:') {
+        document.getElementById('cors-warning').style.display = 'block';
+    }
+
+    // Initialize Lucide Icons
+    lucide.createIcons();
+
+    // Fetch exported JSON data
+    fetch('processed/dashboard_data.json')
+        .then(response => {
+            if (!response.ok) {
+                throw new Error('Network response was not OK');
+            }
+            return response.json();
+        })
+        .then(data => {
+            globalData = data;
+            populateDeviceDropdown();
+            setupEventListeners();
+            // Automatically select first device
+            const firstDevice = Object.keys(data.devices)[0];
+            if (firstDevice) {
+                document.getElementById('device-select').value = firstDevice;
+                updateDashboard(firstDevice);
+            }
+        })
+        .catch(err => {
+            console.error('Failed to load dashboard data:', err);
+            document.getElementById('cors-warning').style.display = 'block';
+        });
+
+    function populateDeviceDropdown() {
+        const select = document.getElementById('device-select');
+        select.innerHTML = '';
+        
+        Object.keys(globalData.devices).forEach((deviceId, idx) => {
+            const opt = document.createElement('option');
+            opt.value = deviceId;
+            opt.textContent = `Trạm VDS - ${deviceId.substring(0, 8)}... (${idx + 1})`;
+            select.appendChild(opt);
+        });
+    }
+
+    function setupEventListeners() {
+        document.getElementById('device-select').addEventListener('change', (e) => {
+            stopSimulation();
+            updateDashboard(e.target.value);
+        });
+
+        document.getElementById('horizon-select').addEventListener('change', (e) => {
+            stopSimulation();
+            updateDashboard(document.getElementById('device-select').value);
+        });
+
+        document.getElementById('btn-validation').addEventListener('click', () => {
+            currentMode = 'validation';
+            document.getElementById('btn-validation').classList.add('active');
+            document.getElementById('btn-future').classList.remove('active');
+            document.getElementById('btn-simulate').style.display = 'flex';
+            document.getElementById('chart-title-text').textContent = 'Xu hướng đối chiếu thực tế vs Dự báo (Tập kiểm thử)';
+            stopSimulation();
+            updateDashboard(document.getElementById('device-select').value);
+        });
+
+        document.getElementById('btn-future').addEventListener('click', () => {
+            currentMode = 'future';
+            document.getElementById('btn-future').classList.add('active');
+            document.getElementById('btn-validation').classList.remove('active');
+            document.getElementById('btn-simulate').style.display = 'none';
+            document.getElementById('chart-title-text').textContent = 'Dự báo lưu lượng xe cho 60 phút tiếp theo (Tương lai)';
+            stopSimulation();
+            updateDashboard(document.getElementById('device-select').value);
+        });
+
+        document.getElementById('btn-simulate').addEventListener('click', () => {
+            toggleSimulation();
+        });
+    }
+
+    function updateDashboard(deviceId) {
+        const deviceData = globalData.devices[deviceId];
+        if (!deviceData) return;
+
+        // 1. Update Metrics Cards
+        document.getElementById('val-mape').textContent = deviceData.metrics.mape.toFixed(2) + '%';
+        document.getElementById('val-r2').textContent = deviceData.metrics.r2.toFixed(3);
+        document.getElementById('val-mae').textContent = deviceData.metrics.mae.toFixed(2);
+        document.getElementById('val-rmse').textContent = deviceData.metrics.rmse.toFixed(2);
+
+        // Color check for R2
+        const r2Element = document.getElementById('val-r2');
+        if (deviceData.metrics.r2 > 0) {
+            r2Element.style.color = 'var(--accent-emerald)';
+        } else {
+            r2Element.style.color = '#ef4444';
+        }
+
+        // 2. Update Specific Horizon Cards
+        document.getElementById('horizon-1m').textContent = Math.round(deviceData.horizons['1m']);
+        document.getElementById('horizon-5m').textContent = Math.round(deviceData.horizons['5m']);
+        document.getElementById('horizon-15m').textContent = Math.round(deviceData.horizons['15m']);
+        document.getElementById('horizon-30m').textContent = Math.round(deviceData.horizons['30m']);
+        document.getElementById('horizon-60m').textContent = Math.round(deviceData.horizons['60m']);
+
+        // 3. Update Weather indicators from the latest observed point
+        let latestHistoryPoint = null;
+        if (currentMode === 'validation') {
+            latestHistoryPoint = deviceData.test_actual[deviceData.test_actual.length - 1];
+        } else {
+            latestHistoryPoint = deviceData.future_history[deviceData.future_history.length - 1];
+        }
+
+        if (latestHistoryPoint) {
+            document.getElementById('weather-rain').textContent = latestHistoryPoint.rain.toFixed(1) + ' mm';
+            document.getElementById('weather-temp').textContent = latestHistoryPoint.temp.toFixed(1) + ' °C';
+            document.getElementById('weather-hum').textContent = latestHistoryPoint.hum.toFixed(0) + ' %';
+            document.getElementById('weather-vis').textContent = (latestHistoryPoint.vis / 1000).toFixed(1) + ' km';
+        }
+
+        // 4. Render Chart
+        if (!isSimulating) {
+            renderChart(deviceData);
+        }
+    }
+
+    function toggleSimulation() {
+        if (isSimulating) {
+            stopSimulation();
+            return;
+        }
+
+        const deviceId = document.getElementById('device-select').value;
+        const deviceData = globalData.devices[deviceId];
+        if (!deviceData) return;
+
+        isSimulating = true;
+        const btn = document.getElementById('btn-simulate');
+        btn.innerHTML = '<i data-lucide="square" style="width: 14px; height: 14px;"></i> Dừng mô phỏng';
+        lucide.createIcons();
+        btn.style.background = 'rgba(239, 68, 68, 0.15)';
+        btn.style.color = '#ef4444';
+        btn.style.borderColor = 'rgba(239, 68, 68, 0.3)';
+
+        const horizonVal = document.getElementById('horizon-select').value;
+        const maxHorizon = deviceData.test_predict.length;
+        const horizon = horizonVal === 'all' ? maxHorizon : Math.min(parseInt(horizonVal), maxHorizon);
+        let simIndex = 0;
+
+        const historyLabels = deviceData.history.map(pt => pt.time.split(' ')[1]);
+        const historyValues = deviceData.history.map(pt => pt.actual);
+
+        const testActualFull = deviceData.test_actual.slice(0, horizon);
+        const testPredictSliced = deviceData.test_predict.slice(0, horizon);
+
+        const forecastLabels = testPredictSliced.map(pt => pt.time.split(' ')[1]);
+        const testPredictFullValues = testPredictSliced.map(pt => pt.predicted);
+        
+        const allLabels = [...historyLabels, ...forecastLabels];
+
+        // Draw forecast fully initially
+        const predictPlotData = [
+            ...Array(historyValues.length - 1).fill(null),
+            historyValues[historyValues.length - 1],
+            ...testPredictFullValues
+        ];
+
+        // Initial setup for simulation: actual is drawn only up to history
+        const initialActual = [...historyValues, ...Array(horizon).fill(null)];
+
+        if (chartInstance) {
+            chartInstance.destroy();
+        }
+
+        chartInstance = new Chart(document.getElementById('trafficChart').getContext('2d'), {
+            type: 'line',
+            data: {
+                labels: allLabels,
+                datasets: [
+                    {
+                        label: 'Lưu lượng thực tế (Actual)',
+                        data: initialActual,
+                        borderColor: '#06b6d4',
+                        backgroundColor: 'rgba(6, 182, 212, 0.05)',
+                        borderWidth: 2.5,
+                        pointRadius: 0,
+                        pointHoverRadius: 5,
+                        fill: true,
+                        tension: 0.1
+                    },
+                    {
+                        label: 'Mô hình dự báo (SARIMAX Validation)',
+                        data: predictPlotData,
+                        borderColor: '#a855f7',
+                        borderWidth: 2.5,
+                        borderDash: [5, 5],
+                        pointRadius: (context) => {
+                            const idx = context.dataIndex - historyValues.length + 1;
+                            return [0, 4, 14, 29, 59].includes(idx) ? 5 : 0;
+                        },
+                        pointBackgroundColor: '#a855f7',
+                        pointHoverRadius: 7,
+                        fill: false,
+                        tension: 0.1
+                    }
+                ]
+            },
+            options: {
+                responsive: true,
+                maintainAspectRatio: false,
+                plugins: {
+                    legend: {
+                        position: 'top',
+                        labels: { color: '#f3f4f6', font: { family: 'Inter', size: 12 } }
+                    },
+                    tooltip: {
+                        mode: 'index',
+                        intersect: false,
+                        backgroundColor: '#111827',
+                        titleColor: '#f3f4f6',
+                        bodyColor: '#f3f4f6',
+                        borderColor: 'rgba(255, 255, 255, 0.1)',
+                        borderWidth: 1,
+                        padding: 10,
+                    }
+                },
+                scales: {
+                    x: {
+                        grid: { color: 'rgba(255, 255, 255, 0.03)' },
+                        ticks: { color: '#9ca3af', maxTicksLimit: 15, font: { family: 'Inter', size: 10 } }
+                    },
+                    y: {
+                        grid: { color: 'rgba(255, 255, 255, 0.03)' },
+                        ticks: { color: '#9ca3af', font: { family: 'Inter', size: 10 } },
+                        title: { display: true, text: 'Số lượng phương tiện (xe / phút)', color: '#9ca3af', font: { family: 'Inter', size: 11 } }
+                    }
+                }
+            }
+        });
+
+        // Run interval to draw actual test line point-by-point
+        simulationInterval = setInterval(() => {
+            simIndex++;
+            if (simIndex > horizon) {
+                stopSimulation();
+                return;
+            }
+
+            const currentActuals = testActualFull.slice(0, simIndex).map(pt => pt.actual);
+            const remainingNulls = Array(horizon - simIndex).fill(null);
+            
+            chartInstance.data.datasets[0].data = [...historyValues, ...currentActuals, ...remainingNulls];
+            chartInstance.update('none');
+        }, 150); // Speed: 150ms per simulation step
+    }
+
+    function stopSimulation() {
+        if (simulationInterval) {
+            clearInterval(simulationInterval);
+            simulationInterval = null;
+        }
+        isSimulating = false;
+        
+        const btn = document.getElementById('btn-simulate');
+        if (btn) {
+            btn.innerHTML = '<i data-lucide="play" style="width: 14px; height: 14px;"></i> Chạy Mô phỏng';
+            lucide.createIcons();
+            btn.style.background = 'rgba(16, 185, 129, 0.15)';
+            btn.style.color = 'var(--accent-emerald)';
+            btn.style.borderColor = 'rgba(16, 185, 129, 0.3)';
+        }
+
+        const deviceId = document.getElementById('device-select').value;
+        const deviceData = globalData?.devices[deviceId];
+        if (deviceData) {
+            renderChart(deviceData);
+        }
+    }
+
+    function renderChart(deviceData) {
+        const ctx = document.getElementById('trafficChart').getContext('2d');
+        
+        let historyLabels, historyValues;
+        let forecastLabels, forecastValues;
+        let testActualValues = [];
+        
+        const horizonVal = document.getElementById('horizon-select').value;
+        const maxHorizon = currentMode === 'validation' ? deviceData.test_predict.length : deviceData.future_forecast.length;
+        const horizon = horizonVal === 'all' ? maxHorizon : Math.min(parseInt(horizonVal), maxHorizon);
+        
+        if (currentMode === 'validation') {
+            const testActualSliced = deviceData.test_actual.slice(0, horizon);
+            const testPredictSliced = deviceData.test_predict.slice(0, horizon);
+            
+            historyLabels = deviceData.history.map(pt => pt.time.split(' ')[1]);
+            historyValues = deviceData.history.map(pt => pt.actual);
+            
+            forecastLabels = testPredictSliced.map(pt => pt.time.split(' ')[1]);
+            forecastValues = testPredictSliced.map(pt => pt.predicted);
+            
+            testActualValues = testActualSliced.map(pt => pt.actual);
+        } else {
+            const futureForecastSliced = deviceData.future_forecast.slice(0, horizon);
+            
+            historyLabels = deviceData.future_history.map(pt => pt.time.split(' ')[1]);
+            historyValues = deviceData.future_history.map(pt => pt.actual);
+            
+            forecastLabels = futureForecastSliced.map(pt => pt.time.split(' ')[1]);
+            forecastValues = futureForecastSliced.map(pt => pt.predicted);
+        }
+        
+        const allLabels = [...historyLabels, ...forecastLabels];
+        let datasets = [];
+        
+        if (currentMode === 'validation') {
+            const actualPlotData = [...historyValues, ...testActualValues];
+            const predictPlotData = [
+                ...Array(historyValues.length - 1).fill(null),
+                historyValues[historyValues.length - 1],
+                ...forecastValues
+            ];
+            
+            datasets = [
+                {
+                    label: 'Lưu lượng thực tế (Actual)',
+                    data: actualPlotData,
+                    borderColor: '#06b6d4',
+                    backgroundColor: 'rgba(6, 182, 212, 0.05)',
+                    borderWidth: 2.5,
+                    pointRadius: 0,
+                    pointHoverRadius: 5,
+                    fill: true,
+                    tension: 0.1
+                },
+                {
+                    label: 'Mô hình dự báo (SARIMAX Validation)',
+                    data: predictPlotData,
+                    borderColor: '#a855f7',
+                    borderWidth: 2.5,
+                    borderDash: [5, 5],
+                    pointRadius: (context) => {
+                        const idx = context.dataIndex - historyValues.length + 1;
+                        return [0, 4, 14, 29, 59].includes(idx) ? 5 : 0;
+                    },
+                    pointBackgroundColor: '#a855f7',
+                    pointHoverRadius: 7,
+                    fill: false,
+                    tension: 0.1
+                }
+            ];
+        } else {
+            const historyPlotData = [...historyValues, ...Array(forecastValues.length).fill(null)];
+            const predictPlotData = [
+                ...Array(historyValues.length - 1).fill(null),
+                historyValues[historyValues.length - 1],
+                ...forecastValues
+            ];
+            
+            datasets = [
+                {
+                    label: 'Lưu lượng thực tế (History)',
+                    data: historyPlotData,
+                    borderColor: '#06b6d4',
+                    backgroundColor: 'rgba(6, 182, 212, 0.05)',
+                    borderWidth: 2.5,
+                    pointRadius: 0,
+                    pointHoverRadius: 5,
+                    fill: true,
+                    tension: 0.1
+                },
+                {
+                    label: 'Dự báo tương lai (SARIMAX Future)',
+                    data: predictPlotData,
+                    borderColor: '#a855f7',
+                    borderWidth: 2.5,
+                    borderDash: [5, 5],
+                    pointRadius: (context) => {
+                        const idx = context.dataIndex - historyValues.length + 1;
+                        return [0, 4, 14, 29, 59].includes(idx) ? 5 : 0;
+                    },
+                    pointBackgroundColor: '#a855f7',
+                    pointHoverRadius: 7,
+                    fill: false,
+                    tension: 0.1
+                }
+            ];
+        }
+
+        if (chartInstance) {
+            chartInstance.destroy();
+        }
+
+        chartInstance = new Chart(ctx, {
+            type: 'line',
+            data: {
+                labels: allLabels,
+                datasets: datasets
+            },
+            options: {
+                responsive: true,
+                maintainAspectRatio: false,
+                plugins: {
+                    legend: {
+                        position: 'top',
+                        labels: {
+                            color: '#f3f4f6',
+                            font: {
+                                family: 'Inter',
+                                size: 12
+                            }
+                        }
+                    },
+                    tooltip: {
+                        mode: 'index',
+                        intersect: false,
+                        backgroundColor: '#111827',
+                        titleColor: '#f3f4f6',
+                        bodyColor: '#f3f4f6',
+                        borderColor: 'rgba(255, 255, 255, 0.1)',
+                        borderWidth: 1,
+                        padding: 10,
+                        titleFont: {
+                            family: 'Inter',
+                            weight: 'bold'
+                        },
+                        bodyFont: {
+                            family: 'Inter'
+                        }
+                    }
+                },
+                scales: {
+                    x: {
+                        grid: {
+                            color: 'rgba(255, 255, 255, 0.03)'
+                        },
+                        ticks: {
+                            color: '#9ca3af',
+                            maxTicksLimit: 15,
+                            font: {
+                                family: 'Inter',
+                                size: 10
+                            }
+                        }
+                    },
+                    y: {
+                        grid: {
+                            color: 'rgba(255, 255, 255, 0.03)'
+                        },
+                        ticks: {
+                            color: '#9ca3af',
+                            font: {
+                                family: 'Inter',
+                                size: 10
+                            }
+                        },
+                        title: {
+                            display: true,
+                            text: 'Số lượng phương tiện (xe / phút)',
+                            color: '#9ca3af',
+                            font: {
+                                family: 'Inter',
+                                size: 11
+                            }
+                        }
+                    }
+                }
+            }
+        });
+    }
+</script>
+
+</body>
+</html>
