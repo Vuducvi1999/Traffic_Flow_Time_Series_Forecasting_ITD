@@ -205,14 +205,15 @@ def select_best_orders(
             try:
                 model = sm.tsa.statespace.SARIMAX(
                     g_train_y,
-                    exog=g_train_X,
+                    exog=g_train_X.astype(float),
                     order=order,
                     seasonal_order=seasonal,
+                    trend='c',
                     enforce_stationarity=False,
                     enforce_invertibility=False,
                 )
-                res = model.fit(disp=False, maxiter=100)
-                pred = res.forecast(steps=val_len, exog=g_val_X).clip(lower=0)
+                res = model.fit(disp=False, maxiter=50)
+                pred = res.forecast(steps=val_len, exog=g_val_X.astype(float)).clip(lower=0)
                 mae = float(np.mean(np.abs(g_val_y.values - pred.values)))
                 if mae < best_val_mae:
                     best_val_mae = mae
@@ -294,7 +295,8 @@ def generate_diagnostic_plots(
     axes[0, 1].legend()
     
     # 3. ACF Plot
-    sm.graphics.tsa.plot_acf(residuals.dropna(), ax=axes[1, 0], lags=40, title="Residual ACF")
+    max_lags = min(40, len(residuals.dropna()) - 1)
+    sm.graphics.tsa.plot_acf(residuals.dropna(), ax=axes[1, 0], lags=max_lags, title="Residual ACF")
     
     # 4. QQ Plot
     stats.probplot(residuals.dropna(), dist="norm", plot=axes[1, 1])
@@ -305,47 +307,52 @@ def generate_diagnostic_plots(
     plt.close()
 
 
-def process_single_device(args_tuple: Tuple[str, pd.DataFrame, bool, dict, bool, bool]) -> Dict[str, Any]:
-    device_id, df_device, is_test_mode, device_config_dict, no_search, seasonal_search = args_tuple
-    logger.info(f"Processing device {device_id}...")
-    
-    # Step 5: Set BucketTime as DatetimeIndex with freq='1min'
-    df_device = df_device.set_index("BucketTime").asfreq("1min")
+def train_model_for_target(
+    device_id: str, df_device: pd.DataFrame, target_col: str,
+    is_test_mode: bool, device_config_dict: dict, no_search: bool, seasonal_search: bool
+) -> Dict[str, Any]:
+    logger.info(f"Training target '{target_col}' for device {device_id[:8]}...")
     
     # Define targets and exogenous columns
-    target_col = "NumVehicles"
-    
-    # To prevent mathematical leakage (where concurrent counts sum directly to NumVehicles),
-    # we convert vehicle class counts and ratios into lag-1 features. We also convert weather
-    # measurements (Rain, Temperature, Humidity, Visibility, WindSpeed) into lag-1 features.
-    # This allows the model to learn from historical vehicle composition and recent weather changes
-    # using only information available up to the previous minute.
-    base_traffic_features = [
-        "AvgSpeed", "Occupancy", "AvgDensity", "AvgHeadway", "FlowRate",
-        "AvgTravelTime", "MedianSpeed", "SpeedStd", "MeanConfidence",
-        "CarCount", "TruckCount", "BusCount", "MotorcycleCount", "OtherVehicleCount",
-        "Rain", "Temperature", "Humidity", "Visibility", "WindSpeed"
-    ]
-    
-    for col in base_traffic_features:
-        df_device[f"{col}_lag1"] = df_device[col].shift(1)
+    # NumVehicles: dùng exog cũ (các biến giao thông + thời tiết)
+    # AvgSpeed: chỉ dùng các biến liên quan trực tiếp đến tốc độ
+    if target_col == "NumVehicles":
+        base_traffic_features = [
+            "AvgSpeed", "Occupancy", "AvgDensity",
+            "Rain", "Temperature", "Humidity", "Visibility", "WindSpeed"
+        ]
+    else:  # AvgSpeed — chỉ biến liên quan đến tốc độ
+        base_traffic_features = [
+            "Occupancy",
+            "Rain", "Temperature", "Humidity", "Visibility", "WindSpeed"
+        ]
         
-    # Handle NaNs from shifting
-    df_device = df_device.bfill().ffill().fillna(0)
+    df_dev = df_device.copy()
+    for col in base_traffic_features:
+        df_dev[f"{col}_lag1"] = df_dev[col].shift(1)
+        
+    # Generate one-hot dummies for Hour and DayOfWeek to capture peaks without linear assumptions
+    hour_dummies = pd.get_dummies(df_dev.index.hour, prefix="Hour", drop_first=True, dtype=int)
+    hour_dummies.index = df_dev.index
+    dow_dummies = pd.get_dummies(df_dev.index.dayofweek, prefix="DoW", drop_first=True, dtype=int)
+    dow_dummies.index = df_dev.index
+    
+    df_dev = pd.concat([df_dev, hour_dummies, dow_dummies], axis=1)
+    df_dev = df_dev.bfill().ffill().fillna(0)
     
     exog_cols = [f"{col}_lag1" for col in base_traffic_features] + [
-        "Hour", "DayOfWeek", "IsWeekend", "IsHoliday"
-    ]
+        "IsHoliday"
+    ] + hour_dummies.columns.tolist() + dow_dummies.columns.tolist()
     
     # If in test mode, subset the data to speed up execution
     if is_test_mode:
-        df_device = df_device.tail(300)  # Use smaller history (300 mins)
+        df_dev = df_dev.tail(300)  # Use smaller history (300 mins)
         
-    y = df_device[target_col]
-    X = df_device[exog_cols]
+    y = df_dev[target_col]
+    X = df_dev[exog_cols].astype(float)
     
-    # Train-test split (last 60 minutes as test)
-    test_length = 60
+    # Train-test split (last 60 minutes as test - 12 steps of 5-min)
+    test_length = 12
     train_y = y.iloc[:-test_length]
     train_X = X.iloc[:-test_length]
     test_y = y.iloc[-test_length:]
@@ -353,38 +360,38 @@ def process_single_device(args_tuple: Tuple[str, pd.DataFrame, bool, dict, bool,
     
     # Step 6: Augmented Dickey-Fuller (ADF) test
     d, p_before, p_after = test_stationarity(train_y)
-    logger.info(f"Device {device_id[:8]} ADF p-value before diff: {p_before:.4f}, after diff (d={d}): {p_after:.4f}")
     
-    s = 60
+    s = 12
     
     # Step 7: Select model orders — check manual config first, then grid search
-    manual_order = device_config_dict.get("order")
-    manual_seasonal = device_config_dict.get("seasonal_order")
-
+    manual_order = device_config_dict.get(f"{target_col}_order") or device_config_dict.get("order")
+    manual_seasonal = device_config_dict.get(f"{target_col}_seasonal_order") or device_config_dict.get("seasonal_order")
+ 
     if manual_order and manual_seasonal:
         order = tuple(manual_order)
         seasonal_order = tuple(manual_seasonal)
         config_source = "manual"
-        logger.info(f"Device {device_id[:8]} using MANUAL config: Order={order}, Seasonal={seasonal_order}")
+        logger.info(f"Device {device_id[:8]} ({target_col}) using MANUAL config: Order={order}, Seasonal={seasonal_order}")
     elif no_search:
         # Fallback default for --no-search without manual config
         order = (1, d, 0)
         seasonal_order = (0, 0, 0, 0)
         config_source = "default"
-        logger.info(f"Device {device_id[:8]} --no-search mode, using fallback: Order={order}")
+        logger.info(f"Device {device_id[:8]} ({target_col}) --no-search mode, using fallback: Order={order}")
     else:
         # Auto grid search with full config
         order, seasonal_order, _ = select_best_orders(train_y, train_X, s, device_config_dict, seasonal_search)
         order = (order[0], d, order[2])
         config_source = "auto"
-        logger.info(f"Device {device_id[:8]} auto-selected Order: {order}, Seasonal: {seasonal_order}")
+        logger.info(f"Device {device_id[:8]} ({target_col}) auto-selected Order: {order}, Seasonal: {seasonal_order}")
     
-    # Step 8: Train SARIMAX Model
+    # Step 8: Train SARIMAX Model (with trend='c' to fit baseline constant level)
     model = sm.tsa.statespace.SARIMAX(
         train_y,
         exog=train_X,
         order=order,
         seasonal_order=seasonal_order,
+        trend='c',
         enforce_stationarity=False,
         enforce_invertibility=False
     )
@@ -392,12 +399,13 @@ def process_single_device(args_tuple: Tuple[str, pd.DataFrame, bool, dict, bool,
     try:
         results = model.fit(disp=False)
     except Exception as e:
-        logger.error(f"Failed to fit SARIMAX for device {device_id}: {e}. Retrying without seasonal component.")
+        logger.error(f"Failed to fit SARIMAX for device {device_id} ({target_col}): {e}. Retrying without seasonal component.")
         # Fallback to standard ARIMAX
         model = sm.tsa.statespace.SARIMAX(
             train_y,
             exog=train_X,
             order=order,
+            trend='c',
             enforce_stationarity=False,
             enforce_invertibility=False
         )
@@ -405,7 +413,7 @@ def process_single_device(args_tuple: Tuple[str, pd.DataFrame, bool, dict, bool,
     
     # Step 9: Forecast on Test set
     forecast = results.forecast(steps=test_length, exog=test_X)
-    forecast = pd.Series(forecast, index=test_y.index).clip(lower=0) # Vehicle counts cannot be negative
+    forecast = pd.Series(forecast, index=test_y.index).clip(lower=0)
     
     # Step 10: Evaluate metrics
     mae = mean_absolute_error(test_y, forecast)
@@ -413,19 +421,23 @@ def process_single_device(args_tuple: Tuple[str, pd.DataFrame, bool, dict, bool,
     mape = compute_mape(test_y, forecast)
     r2 = r2_score(test_y, forecast)
     
-    logger.info(f"Device {device_id[:8]} Evaluation - MAE: {mae:.2f}, RMSE: {rmse:.2f}, MAPE: {mape:.2f}%, R2: {r2:.2f}")
+    logger.info(f"Device {device_id[:8]} ({target_col}) Evaluation - MAE: {mae:.2f}, RMSE: {rmse:.2f}, MAPE: {mape:.2f}%, R2: {r2:.2f}")
     
     # Step 11 & 12: Generate Plots
-    plot_eval_path = PLOT_DIR / f"forecast_{device_id}.png"
-    generate_evaluation_plots(device_id, train_y, test_y, forecast, plot_eval_path)
+    plot_eval_path = PLOT_DIR / f"forecast_{target_col}_{device_id}.png"
+    generate_evaluation_plots(f"{device_id} ({target_col})", train_y, test_y, forecast, plot_eval_path)
     
     residuals = test_y - forecast
-    plot_diag_path = PLOT_DIR / f"diagnostics_{device_id}.png"
-    generate_diagnostic_plots(device_id, residuals, plot_diag_path)
+    plot_diag_path = PLOT_DIR / f"diagnostics_{target_col}_{device_id}.png"
+    generate_diagnostic_plots(f"{device_id} ({target_col})", residuals, plot_diag_path)
     
     # Ljung-Box Test on Residuals
-    ljung_box_results = acorr_ljungbox(residuals.dropna(), lags=[10], return_df=True)
-    ljung_p_value = float(ljung_box_results["lb_pvalue"].iloc[0])
+    ljung_lag = min(10, len(residuals.dropna()) - 1)
+    if ljung_lag > 0:
+        ljung_box_results = acorr_ljungbox(residuals.dropna(), lags=[ljung_lag], return_df=True)
+        ljung_p_value = float(ljung_box_results["lb_pvalue"].iloc[0])
+    else:
+        ljung_p_value = 1.0
     
     # Step 13: Analysis of Coefficients
     summary_coefs = {}
@@ -436,45 +448,55 @@ def process_single_device(args_tuple: Tuple[str, pd.DataFrame, bool, dict, bool,
         }
         
     # Step 14: Multi-horizon Forecast (15, 30, 60 minutes into the absolute future)
-    # We need exogenous variables for the future.
-    # We construct X_future by persisting the last row of X test_length times.
     last_exog = X.iloc[-1:]
-    X_future = pd.concat([last_exog] * 60, ignore_index=True)
-    future_index = pd.date_range(start=y.index[-1] + pd.Timedelta("1min"), periods=60, freq="1min")
+    X_future = pd.concat([last_exog] * 12, ignore_index=True)
+    future_index = pd.date_range(start=y.index[-1] + pd.Timedelta("5min"), periods=12, freq="5min")
     X_future.index = future_index
     
     # Update time-dependent features dynamically for the future index
-    X_future["Hour"] = X_future.index.hour
-    X_future["DayOfWeek"] = X_future.index.dayofweek
-    X_future["IsWeekend"] = X_future.index.dayofweek.isin([5, 6]).astype(int)
+    future_hour_dummies = pd.get_dummies(future_index.hour, prefix="Hour", drop_first=True, dtype=int)
+    future_hour_dummies.index = future_index
+    future_dow_dummies = pd.get_dummies(future_index.dayofweek, prefix="DoW", drop_first=True, dtype=int)
+    future_dow_dummies.index = future_index
+    
+    # Drop old dummy columns and concat the new ones for the future steps
+    cols_to_drop = [c for c in X.columns if "Hour_" in c or "DoW_" in c]
+    X_future = X_future.drop(columns=cols_to_drop, errors="ignore")
+    X_future = pd.concat([X_future, future_hour_dummies, future_dow_dummies], axis=1)
+    
     X_future["IsHoliday"] = is_vietnam_holiday(pd.Series(X_future.index)).values
     
-    # Train full model on all data before future forecast
+    # Align future columns with training columns (filling missing dummies with 0)
+    X_future = X_future.reindex(columns=X.columns, fill_value=0).astype(float)
+    
+    # Train full model on all data before future forecast (with trend='c')
     full_model = sm.tsa.statespace.SARIMAX(
         y,
         exog=X,
         order=order,
         seasonal_order=seasonal_order,
+        trend='c',
         enforce_stationarity=False,
         enforce_invertibility=False
     )
     full_results = full_model.fit(disp=False)
     
-    future_forecast = full_results.forecast(steps=60, exog=X_future).clip(lower=0)
+    future_forecast = full_results.forecast(steps=12, exog=X_future).clip(lower=0)
     future_forecast.index = future_index
     
     future_predictions = {
-        "15min": float(future_forecast.iloc[14]),
-        "30min": float(future_forecast.iloc[29]),
-        "60min": float(future_forecast.iloc[59])
+        "15min": float(future_forecast.iloc[2]),
+        "30min": float(future_forecast.iloc[5]),
+        "60min": float(future_forecast.iloc[11])
     }
     
     # Step 15: Save model to file
-    model_save_path = OUT_DIR / f"model_{device_id}.joblib"
+    model_save_path = OUT_DIR / f"model_{target_col}_{device_id}.joblib"
     joblib.dump(results, model_save_path)
     
     return {
         "device_id": device_id,
+        "target_col": target_col,
         "mae": mae,
         "rmse": rmse,
         "mape": mape,
@@ -491,6 +513,23 @@ def process_single_device(args_tuple: Tuple[str, pd.DataFrame, bool, dict, bool,
         "forecast_png": str(plot_eval_path),
         "diagnostics_png": str(plot_diag_path)
     }
+
+
+def process_single_device(args_tuple: Tuple[str, pd.DataFrame, bool, dict, bool, bool]) -> List[Dict[str, Any]]:
+    device_id, df_device, is_test_mode, device_config_dict, no_search, seasonal_search = args_tuple
+    logger.info(f"Processing device {device_id}...")
+    
+    # Set BucketTime as DatetimeIndex with freq='5min'
+    df_device = df_device.set_index("BucketTime").asfreq("5min")
+    
+    res_num_vehicles = train_model_for_target(
+        device_id, df_device, "NumVehicles", is_test_mode, device_config_dict, no_search, seasonal_search
+    )
+    res_avg_speed = train_model_for_target(
+        device_id, df_device, "AvgSpeed", is_test_mode, device_config_dict, no_search, seasonal_search
+    )
+    
+    return [res_num_vehicles, res_avg_speed]
 
 
 def main():
@@ -530,14 +569,19 @@ def main():
     logger.info(f"Starting model training for {len(devices)} devices using {args.n_jobs} parallel jobs...")
     
     # Execute training in parallel
-    results_list = joblib.Parallel(n_jobs=args.n_jobs)(
+    raw_results = joblib.Parallel(n_jobs=args.n_jobs)(
         joblib.delayed(process_single_device)(task) for task in tqdm(tasks, desc="Training SARIMAX models")
     )
     
+    results_list = []
+    for r in raw_results:
+        results_list.extend(r)
+        
     # Step 10: Compile and display final results
     results_df = pd.DataFrame([
         {
             "DeviceId": r["device_id"],
+            "TargetCol": r["target_col"],
             "MAE": r["mae"],
             "RMSE": r["rmse"],
             "MAPE (%)": r["mape"],
@@ -564,7 +608,14 @@ def main():
     logger.info(f"Evaluation metrics saved to: {metrics_path}")
     
     # Save coefficient breakdown to JSON for later analysis
-    coef_report = {r["device_id"]: {"coefs": r["coefs"]} for r in results_list}
+    coef_report = {}
+    for r in results_list:
+        dev_id = r["device_id"]
+        t_col = r["target_col"]
+        if dev_id not in coef_report:
+            coef_report[dev_id] = {}
+        coef_report[dev_id][t_col] = {"coefs": r["coefs"]}
+        
     coef_report_path = OUT_DIR / "sarimax_coefficients.json"
     import json
     coef_report_path.write_text(json.dumps(coef_report, indent=2, ensure_ascii=False), encoding="utf-8")

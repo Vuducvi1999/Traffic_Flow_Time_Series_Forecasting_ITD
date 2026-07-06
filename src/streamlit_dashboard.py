@@ -24,12 +24,15 @@ METRICS_PATH = ROOT / "data" / "processed" / "models" / "sarimax_evaluation_metr
 MODEL_DIR = ROOT / "data" / "processed" / "models"
 
 BASE_TRAFFIC_FEATURES = [
-    "AvgSpeed", "Occupancy", "AvgDensity", "AvgHeadway", "FlowRate",
+    "NumVehicles", "Occupancy", "AvgDensity", "AvgHeadway", "FlowRate",
     "AvgTravelTime", "MedianSpeed", "SpeedStd", "MeanConfidence",
-    "CarCount", "TruckCount", "BusCount", "MotorcycleCount", "OtherVehicleCount",
-    "Rain", "Temperature", "Humidity", "Visibility", "WindSpeed"
+    "Rain", "Temperature", "Humidity", "Visibility", "WindSpeed",
+    "NumVehicles_roll_mean_15m", "NumVehicles_roll_std_15m",
+    "NumVehicles_roll_mean_30m", "NumVehicles_roll_std_30m",
+    "AvgSpeed_roll_mean_15m", "AvgSpeed_roll_std_15m",
+    "AvgSpeed_roll_mean_30m", "AvgSpeed_roll_std_30m",
 ]
-TARGET_COL = "NumVehicles"
+# We will select target_col dynamically in the sidebar.
 
 # Clean custom CSS for simple styling (no fancy colors, just nice layout)
 st.markdown("""
@@ -57,8 +60,8 @@ def load_data():
     return df, metrics
 
 @st.cache_resource(show_spinner=False)
-def load_model(device_id: str):
-    path = MODEL_DIR / f"model_{device_id}.joblib"
+def load_model(device_id: str, target_col: str):
+    path = MODEL_DIR / f"model_{target_col}_{device_id}.joblib"
     if path.exists():
         return joblib.load(path)
     return None
@@ -71,31 +74,45 @@ def compute_mape(y_true, y_pred):
         return 0.0
     return float(np.mean(np.abs(y_true[mask] - y_pred[mask]) / y_true[mask]) * 100)
 
-def prepare_device_data(df, device_id):
+def prepare_device_data(df, device_id, target_col):
     from prepare_forecasting_dataset import is_vietnam_holiday
 
     df_dev = df[df["DeviceId"] == device_id].copy()
     df_dev = df_dev.sort_values(by=["Lane", "BucketTime"]).reset_index(drop=True)
 
-    numeric_cols = [TARGET_COL] + BASE_TRAFFIC_FEATURES
+    if target_col == "NumVehicles":
+        base_traffic_features = [
+            "AvgSpeed", "Occupancy", "AvgDensity",
+            "Rain", "Temperature", "Humidity", "Visibility", "WindSpeed"
+        ]
+    else:  # AvgSpeed
+        base_traffic_features = [
+            "NumVehicles", "Occupancy", "AvgDensity",
+            "Rain", "Temperature", "Humidity", "Visibility", "WindSpeed"
+        ]
+
+    numeric_cols = [target_col] + base_traffic_features
     agg = df_dev.groupby("BucketTime")[numeric_cols].mean().reset_index()
-    agg = agg.set_index("BucketTime").asfreq("1min")
+    agg = agg.set_index("BucketTime").asfreq("5min")
 
-    agg["Hour"] = agg.index.hour
-    agg["DayOfWeek"] = agg.index.dayofweek
-    agg["IsWeekend"] = (agg.index.dayofweek >= 5).astype(int)
-    agg["IsHoliday"] = is_vietnam_holiday(pd.Series(agg.index)).values
-
-    for col in BASE_TRAFFIC_FEATURES:
+    for col in base_traffic_features:
         agg[f"{col}_lag1"] = agg[col].shift(1)
 
+    hour_dummies = pd.get_dummies(agg.index.hour, prefix="Hour", drop_first=True, dtype=int)
+    hour_dummies.index = agg.index
+    dow_dummies = pd.get_dummies(agg.index.dayofweek, prefix="DoW", drop_first=True, dtype=int)
+    dow_dummies.index = agg.index
+
+    agg = pd.concat([agg, hour_dummies, dow_dummies], axis=1)
     agg = agg.bfill().ffill().fillna(0)
 
-    exog_cols = [f"{col}_lag1" for col in BASE_TRAFFIC_FEATURES] + [
-        "Hour", "DayOfWeek", "IsWeekend", "IsHoliday"
-    ]
-    y = agg[TARGET_COL]
-    X = agg[exog_cols]
+    agg["IsHoliday"] = is_vietnam_holiday(pd.Series(agg.index)).values
+
+    exog_cols = [f"{col}_lag1" for col in base_traffic_features] + [
+        "IsHoliday"
+    ] + hour_dummies.columns.tolist() + dow_dummies.columns.tolist()
+    y = agg[target_col]
+    X = agg[exog_cols].astype(float)
     return y, X, agg
 
 def main():
@@ -103,21 +120,32 @@ def main():
     st.write("Giao diện kiểm chứng độ chính xác trực quan. Bạn có thể chọn bất kỳ thời điểm nào trong lịch sử để chạy mô phỏng đối chất song song Thực tế vs Dự báo.")
 
     df, metrics_df = load_data()
-    device_ids = sorted(metrics_df["DeviceId"].tolist())
 
     # --- SIDEBAR CONTROLS ---
     st.sidebar.header("⚙️ Cấu hình bộ lọc")
     
+    target_col = st.sidebar.selectbox(
+        "Biến mục tiêu", 
+        options=["NumVehicles", "AvgSpeed"], 
+        format_func=lambda x: "NumVehicles (Lưu lượng xe)" if x == "NumVehicles" else "AvgSpeed (Tốc độ)"
+    )
+    
+    # Filter device list using only devices present for selected target
+    target_metrics = metrics_df[metrics_df["TargetCol"] == target_col]
+    device_ids = sorted(target_metrics["DeviceId"].tolist())
+    if not device_ids:
+        device_ids = sorted(df["DeviceId"].unique().tolist())
+        
     selected_device = st.sidebar.selectbox("Trạm VDS", options=device_ids, format_func=lambda x: f"Trạm {x[:8]}...")
     
-    horizon = st.sidebar.slider("Số phút dự báo (Horizon)", min_value=1, max_value=120, value=60, step=1)
+    horizon = st.sidebar.slider("Số phút dự báo (Horizon)", min_value=5, max_value=120, value=60, step=5)
     history_window = st.sidebar.slider("Số phút lịch sử hiển thị", min_value=30, max_value=240, value=120, step=30)
     
     show_weather = st.sidebar.checkbox("Hiển thị cột lượng mưa", value=True)
 
     # --- PROCESS DATA & MODEL ---
-    y, X, agg = prepare_device_data(df, selected_device)
-    results = load_model(selected_device)
+    y, X, agg = prepare_device_data(df, selected_device, target_col)
+    results = load_model(selected_device, target_col)
 
     if results is None:
         st.error(f"Không tìm thấy file model cho trạm: {selected_device}")
@@ -152,7 +180,7 @@ def main():
     # Split slices dynamically based on forecast_start_time
     train_y = y.loc[:forecast_start_time]
     
-    start_future = forecast_start_time + pd.Timedelta("1min")
+    start_future = forecast_start_time + pd.Timedelta("5min")
     end_future = forecast_start_time + pd.Timedelta(minutes=horizon)
     
     test_act = y.loc[start_future:end_future]
@@ -170,8 +198,9 @@ def main():
         ci_upper = ci.iloc[:, 1]
     except Exception:
         # Fallback to standard forecast
-        forecast_mean = results.forecast(steps=horizon, exog=test_exog).clip(lower=0)
-        forecast_mean.index = pd.date_range(start=start_future, periods=horizon, freq="1min")
+        steps = horizon // 5
+        forecast_mean = results.forecast(steps=steps, exog=test_exog).clip(lower=0)
+        forecast_mean.index = pd.date_range(start=start_future, periods=steps, freq="5min")
         std_est = float(fitted_vals.std()) * 1.5 if fitted_vals.notna().any() else 10.0
         ci_lower = (forecast_mean - std_est * 1.96).clip(lower=0)
         ci_upper = forecast_mean + std_est * 1.96
@@ -189,11 +218,11 @@ def main():
 
     # Calculate First & Second Difference as Percentage at the chosen forecast_start_time
     y_at_t = float(y.loc[forecast_start_time])
-    t_prev1 = forecast_start_time - pd.Timedelta("1min")
+    t_prev1 = forecast_start_time - pd.Timedelta("5min")
     y_prev1 = float(y.loc[t_prev1]) if t_prev1 in y.index else y_at_t
     v1_pct = ((y_at_t - y_prev1) / y_prev1 * 100) if y_prev1 > 0 else 0.0
 
-    t_prev2 = forecast_start_time - pd.Timedelta("2min")
+    t_prev2 = forecast_start_time - pd.Timedelta("10min")
     y_prev2 = float(y.loc[t_prev2]) if t_prev2 in y.index else y_prev1
     v1_prev_pct = ((y_prev1 - y_prev2) / y_prev2 * 100) if y_prev2 > 0 else 0.0
     v2_pct = v1_pct - v1_prev_pct
@@ -218,10 +247,12 @@ def main():
             <div class="metric-value" style="color: {'#10b981' if r2 > 0.4 else '#ef4444'}">{r2:.3f}</div>
             <div class="metric-desc">Độ tương quan đường dự đoán</div>
         </div>""", unsafe_allow_html=True)
+    mae_title = "MAE (LỆCH TỐC ĐỘ)" if target_col == "AvgSpeed" else "MAE (LỆCH SỐ XE)"
+    mae_unit = "km/h" if target_col == "AvgSpeed" else "xe"
     with c3:
         st.markdown(f"""<div class="metric-box">
-            <div class="metric-title">MAE (LỆCH SỐ XE)</div>
-            <div class="metric-value" style="color: #3b82f6">±{mae:.1f} xe</div>
+            <div class="metric-title">{mae_title}</div>
+            <div class="metric-value" style="color: #3b82f6">±{mae:.1f} {mae_unit}</div>
             <div class="metric-desc">Lệch trung bình mỗi phút</div>
         </div>""", unsafe_allow_html=True)
     with c4:
@@ -319,6 +350,7 @@ def main():
             )
         )
 
+    y_axis_title = "Tốc độ (km/h)" if target_col == "AvgSpeed" else "Lưu lượng xe (xe/5 phút)"
     fig.update_layout(
         **layout_extra,
         margin=dict(l=40, r=40, t=20, b=40),
@@ -327,7 +359,7 @@ def main():
         height=500
     )
     fig.update_xaxes(gridcolor="#e5e7eb", linecolor="#cccccc")
-    fig.update_yaxes(title_text="Số xe / phút", gridcolor="#e5e7eb", linecolor="#cccccc")
+    fig.update_yaxes(title_text=y_axis_title, gridcolor="#e5e7eb", linecolor="#cccccc")
 
     st.plotly_chart(fig, width='stretch')
 
@@ -335,9 +367,9 @@ def main():
     with st.expander("📋 Xem bảng số liệu đối chất chi tiết", expanded=False):
         fc_table = pd.DataFrame({
             "Thời gian": forecast_mean.index.strftime("%H:%M"),
-            "Dự báo (xe/phút)": forecast_mean.values.round(1),
-            "Thực tế tương lai": test_act.reindex(forecast_mean.index).values.round(1),
-            "Lệch (Sai số tuyệt đối)": np.abs(test_act.reindex(forecast_mean.index).values - forecast_mean.values).round(1),
+            f"Dự báo ({mae_unit})": forecast_mean.values.round(1),
+            f"Thực tế tương lai ({mae_unit})": test_act.reindex(forecast_mean.index).values.round(1),
+            f"Lệch ({mae_unit})": np.abs(test_act.reindex(forecast_mean.index).values - forecast_mean.values).round(1),
             "Giới hạn dưới (CI Lower)": ci_lower.values.round(1),
             "Giới hạn trên (CI Upper)": ci_upper.values.round(1)
         })
