@@ -311,7 +311,6 @@ def save_device_config(device_id, config, result, target_col):
     save_config(config)
 
 def optimize_one_device(args):
-def optimize_one_device(args):
     device_id, df_data, config, target_col = args
     df_device = df_data[df_data["DeviceId"] == device_id].copy()
 

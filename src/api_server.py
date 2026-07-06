@@ -9,7 +9,7 @@ import sys
 from pathlib import Path
 from typing import Dict, List, Optional
 from contextlib import asynccontextmanager
-
+from datetime import datetime
 import numpy as np
 import pandas as pd
 import joblib
@@ -167,7 +167,7 @@ class NodeForecastRequest(BaseModel):
 
 
 class NodeForecastPoint(BaseModel):
-    Time: str
+    Time: datetime
     NumVehicles: float
     AvgSpeed: float
     Occupancy: float
@@ -374,6 +374,7 @@ async def forecast(device_id: str, request: ForecastRequest):
 
 @app.post("/api/nodes/{node_id}/forecast", response_model=NodeForecastResponse)
 async def forecast_node(node_id: str, request: NodeForecastRequest):
+    node_id = node_id.upper()
     if node_id not in models:
         raise HTTPException(404, f"Node '{node_id}' not found")
 
@@ -474,7 +475,7 @@ async def forecast_node(node_id: str, request: NodeForecastRequest):
         resp_confidence = float(obs.get("MeanConfidence", 0.0))
 
     forecast_point = NodeForecastPoint(
-        Time=forecast_time.strftime("%Y-%m-%d %H:%M"),
+        Time=forecast_time,
         NumVehicles=round(resp_num_vehicles, 1),
         AvgSpeed=round(resp_avg_speed, 2),
         Occupancy=round(resp_occupancy, 2),
@@ -491,6 +492,8 @@ async def forecast_node(node_id: str, request: NodeForecastRequest):
         "Mape": round(db_metrics.get("mape", 0.0), 2),
         "R2": round(db_metrics.get("r2", 0.0), 3),
     }
+
+    print(forecast_point)
 
     return NodeForecastResponse(
         Forecast=forecast_point,

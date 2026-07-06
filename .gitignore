@@ -1,10 +1,6 @@
 # --- Data & Models (Large Files) ---
 data/
 
-# --- Log Files ---
-logs/
-*.log
-
 # --- Python Environment & Caches ---
 __pycache__/
 *.py[cod]

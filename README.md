@@ -135,15 +135,15 @@ python src/train_sarimax.py --n-jobs -1
 Hệ thống sử dụng kiến trúc phân tách với một API gốc và một Proxy Gateway trung gian.
 
 1. **Khởi chạy API gốc (cổng 8001)**:
-   ```bash
-   python src/api_server.py
-   ```
+```bash
+python src/api_server.py
+```
 2. **Khởi chạy Proxy Gateway (cổng 8002)**:
-   Mở một Terminal mới, kích hoạt môi trường ảo và chạy:
-   ```bash
-   cd src/gateway
-   python main.py
-   ```
+Mở một Terminal mới, kích hoạt môi trường ảo và chạy:
+```bash
+cd src/gateway
+python main.py
+```
 
 ### Bước 5: Khởi chạy Streamlit Dashboard
 ```bash

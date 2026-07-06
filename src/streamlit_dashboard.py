@@ -187,7 +187,7 @@ def main():
     test_exog = X.loc[start_future:end_future]
     
     hist_act = train_y.iloc[-history_window:]
-    fitted_vals = results.fittedvalues.reindex(hist_act.index).fillna(method="ffill").fillna(method="bfill")
+    fitted_vals = results.fittedvalues.reindex(hist_act.index).ffill().bfill()
 
     # Forecast using statsmodels predict/forecast starting at the selected time
     try:

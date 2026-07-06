@@ -8,8 +8,16 @@ import numpy as np
 import pandas as pd
 
 ROOT = Path(__file__).resolve().parent.parent
-TRAFFIC_FILE = ROOT / "data" / "raw" / "iTMS_VDS_Traffic_202606290917.csv"
-VEHICLE_FILE = ROOT / "data" / "raw" / "iTMS_VDS_Vehicle_202606290919.csv"
+RAW_DIR = ROOT / "data" / "raw"
+TRAFFIC_FILE = max(
+    RAW_DIR.glob("iTMS_VDS_Traffic_*.csv"),
+    key=lambda f: f.stat().st_mtime,
+)
+
+VEHICLE_FILE = max(
+    RAW_DIR.glob("iTMS_VDS_Vehicle_*.csv"),
+    key=lambda f: f.stat().st_mtime,
+)
 OUT_DIR = ROOT / "data" / "processed"
 AUDIT_DIR = OUT_DIR / "audit"
 OUT_DIR.mkdir(exist_ok=True)
@@ -566,7 +574,12 @@ def build_final_dataset() -> Tuple[pd.DataFrame, Dict[str, object]]:
     final["Month"] = final["BucketTime"].dt.month
 
     # --- Load and Merge Weather (WOS) Data ---
-    wos_path = ROOT / "data" / "raw" / "iTMS_WOS_Raw_202606290934.csv"
+    # wos_path = ROOT / "data" / "raw" / "iTMS_WOS_Raw_202606290934.csv"
+    RAW_DIR = ROOT / "data" / "raw"
+    wos_path = max(
+        RAW_DIR.glob("iTMS_WOS_Raw_*.csv"),
+        key=lambda f: f.stat().st_mtime,
+    )
     weather_cols = ["Rain", "Temperature", "Humidity", "Visibility", "WindSpeed"]
     weather_df = pd.read_csv(wos_path, usecols=["BucketTime"] + weather_cols)
     weather_df["BucketTime"] = parse_bucket_time(weather_df["BucketTime"])

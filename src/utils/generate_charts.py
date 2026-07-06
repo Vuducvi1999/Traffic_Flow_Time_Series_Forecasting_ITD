@@ -9,9 +9,16 @@ import pandas as pd
 ROOT = Path(__file__).resolve().parent.parent.parent
 OUT = ROOT / 'docs' / 'charts'
 OUT.mkdir(parents=True, exist_ok=True)
+RAW_DIR = ROOT / "data" / "raw"
+TRAFFIC_FILE = max(
+    RAW_DIR.glob("iTMS_VDS_Traffic_*.csv"),
+    key=lambda f: f.stat().st_mtime,
+)
 
-TRAFFIC_FILE = ROOT / 'data' / 'raw' / 'iTMS_VDS_Traffic_202606290917.csv'
-VEHICLE_FILE = ROOT / 'data' / 'raw' / 'iTMS_VDS_Vehicle_202606290919.csv'
+VEHICLE_FILE = max(
+    RAW_DIR.glob("iTMS_VDS_Vehicle_*.csv"),
+    key=lambda f: f.stat().st_mtime,
+)
 
 plt.rcParams.update({
     'figure.figsize': (12, 7),
