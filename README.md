@@ -214,6 +214,88 @@ Trình duyệt sẽ tự động mở trang web tại địa chỉ `http://local
 * **Endpoint**: `POST /api/devices/{device_id}/extend`
 * **Mô tả**: Đưa thêm một bản ghi quan trắc mới vào chuỗi lịch sử của mô hình mà không cần phải huấn luyện lại từ đầu. Thao tác này giúp cải thiện độ chính xác cho lần dự báo kế tiếp.
 
+### 6. Dự báo giao thông (Node API)
+* **Endpoint**: `POST /api/nodes/{node_id}/forecast`
+* **Headers**: `Content-Type: application/json`
+* **Mô tả**: Dự báo các thông số giao thông (NumVehicles, AvgSpeed, Occupancy, AvgDensity, AvgHeadway, FlowRate, Confidence) cho các mốc thời gian tiếp theo (bước 5 phút). Sử dụng **key viết hoa đầu** (PascalCase) trong request/response.
+* **Body cấu trúc**:
+  ```json
+  {
+    "Horizon": 15,
+    "ObservationTime": "2026-06-29 09:18",
+    "CurrentObservation": {
+      "NumVehicles": 25,
+      "AvgSpeed": 45.2,
+      "Occupancy": 12.5,
+      "AvgDensity": 8.2,
+      "AvgHeadway": 2.1,
+      "FlowRate": 1500,
+      "Confidence": 98.2,
+      "Rain": 0.0,
+      "Temperature": 32.5,
+      "Humidity": 78.0,
+      "Visibility": 9000.0,
+      "WindSpeed": 2.5
+    }
+  }
+  ```
+  | Trường | Kiểu | Bắt buộc | Mô tả |
+  |--------|------|----------|-------|
+  | `Horizon` | int | Có | Số phút cần dự báo (min 1, max 1440). Mô hình dự báo theo bước 5 phút → số điểm trả về = `Horizon // 5` |
+  | `ObservationTime` | string | Không | Mốc thời gian "hiện tại" (định dạng `"YYYY-MM-DD HH:MM"`). Nếu bỏ trống, dùng timestamp cuối dataset + 1 phút |
+  | `CurrentObservation` | object | Không | Dữ liệu quan trắc tại `ObservationTime`. Khác với endpoint `/api/devices/`, dùng trường `Confidence` thay vì `MeanConfidence`. Nếu bỏ trống, tự động lấy bản ghi cuối trong CSDL |
+
+* **Response mẫu**:
+  ```json
+  {
+    "Forecast": [
+      {
+        "Time": "2026-06-29T09:23:00",
+        "NumVehicles": 25.0,
+        "AvgSpeed": 42.50,
+        "Occupancy": 12.50,
+        "AvgDensity": 8.20,
+        "AvgHeadway": 2.10,
+        "FlowRate": 1500.00,
+        "Confidence": 98.20
+      },
+      {
+        "Time": "2026-06-29T09:28:00",
+        "NumVehicles": 25.0,
+        "AvgSpeed": 41.80,
+        "Occupancy": 12.50,
+        "AvgDensity": 8.20,
+        "AvgHeadway": 2.10,
+        "FlowRate": 1500.00,
+        "Confidence": 98.20
+      },
+      {
+        "Time": "2026-06-29T09:33:00",
+        "NumVehicles": 25.0,
+        "AvgSpeed": 40.20,
+        "Occupancy": 12.50,
+        "AvgDensity": 8.20,
+        "AvgHeadway": 2.10,
+        "FlowRate": 1500.00,
+        "Confidence": 98.20
+      }
+    ],
+    "Metrics": {
+      "Mae": 3.50,
+      "Rmse": 4.20,
+      "Mape": 8.10,
+      "R2": 0.92
+    }
+  }
+  ```
+  | Trường | Mô tả |
+  |--------|-------|
+  | `Forecast` | Mảng các điểm dự báo, mỗi điểm cách nhau **5 phút**. Số lượng = `Horizon // 5`. Mỗi điểm gồm Time, NumVehicles, AvgSpeed, Occupancy, AvgDensity, AvgHeadway, FlowRate, Confidence |
+  | `Metrics` | Chỉ số đánh giá mô hình: Mae, Rmse, Mape, R2 |
+
+* **Lưu ý**: 
+  * `Forecast[].AvgSpeed` luôn là giá trị dự báo thực tế; các trường còn lại (`NumVehicles`, `Occupancy`, ...) được lấy từ dữ liệu lịch sử gần nhất hoặc giá trị `CurrentObservation` — không phải giá trị mô hình dự báo cho các trường đó.
+
 ---
 
 ## Chi Tiết Giải Thuật & Thiết Kế Kỹ Thuật

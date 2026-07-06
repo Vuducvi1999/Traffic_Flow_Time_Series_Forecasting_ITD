@@ -178,7 +178,7 @@ class NodeForecastPoint(BaseModel):
 
 
 class NodeForecastResponse(BaseModel):
-    Forecast: NodeForecastPoint
+    Forecast: List[NodeForecastPoint]
     Metrics: Dict[str, float]
 
 
@@ -375,6 +375,7 @@ async def forecast(device_id: str, request: ForecastRequest):
 @app.post("/api/nodes/{node_id}/forecast", response_model=NodeForecastResponse)
 async def forecast_node(node_id: str, request: NodeForecastRequest):
     node_id = node_id.upper()
+    print(request)
     if node_id not in models:
         raise HTTPException(404, f"Node '{node_id}' not found")
 
@@ -409,8 +410,10 @@ async def forecast_node(node_id: str, request: NodeForecastRequest):
             else:
                 obs[col] = 0.0
 
-    # Build observation row
+    # Build observation row (strip timezone to match naive agg.index)
     obs_ts = pd.Timestamp(current_time) if not isinstance(current_time, pd.Timestamp) else current_time
+    if getattr(obs_ts, 'tz', None) is not None:
+        obs_ts = obs_ts.tz_localize(None)
     obs_row = pd.Series({
         **obs,
         "Hour": obs_ts.hour,
@@ -450,40 +453,42 @@ async def forecast_node(node_id: str, request: NodeForecastRequest):
             raise HTTPException(500, f"Forecast failed: {e} / {e2}")
 
     forecast_result.index = future_index
-    predicted_val = float(forecast_result.iloc[0])
 
-    # Build forecast point
-    forecast_time = obs_ts + pd.Timedelta("5min")
-    
-    # Retrieve forecast exogenous values from database at that minute if available, else fall back to request inputs
-    if forecast_time in agg.index:
-        forecast_row = agg.loc[forecast_time]
-        resp_num_vehicles = float(forecast_row["NumVehicles"]) if TARGET_COL != "NumVehicles" else predicted_val
-        resp_avg_speed = float(forecast_row["AvgSpeed"]) if TARGET_COL != "AvgSpeed" else predicted_val
-        resp_occupancy = float(forecast_row["Occupancy"])
-        resp_avg_density = float(forecast_row["AvgDensity"])
-        resp_avg_headway = float(forecast_row["AvgHeadway"])
-        resp_flow_rate = float(forecast_row["FlowRate"])
-        resp_confidence = float(forecast_row["MeanConfidence"])
-    else:
-        resp_num_vehicles = float(obs.get("NumVehicles", 0.0)) if TARGET_COL != "NumVehicles" else predicted_val
-        resp_avg_speed = float(obs.get("AvgSpeed", 0.0)) if TARGET_COL != "AvgSpeed" else predicted_val
-        resp_occupancy = float(obs.get("Occupancy", 0.0))
-        resp_avg_density = float(obs.get("AvgDensity", 0.0))
-        resp_avg_headway = float(obs.get("AvgHeadway", 0.0))
-        resp_flow_rate = float(obs.get("FlowRate", 0.0))
-        resp_confidence = float(obs.get("MeanConfidence", 0.0))
+    # Build all forecast points
+    forecast_points = []
+    for i, (f_t, pred_val) in enumerate(zip(future_index, forecast_result)):
+        forecast_time = f_t
+        predicted_val = float(pred_val)
+        
+        # Retrieve forecast exogenous values from database at that minute if available, else fall back to request inputs
+        if forecast_time in agg.index:
+            forecast_row = agg.loc[forecast_time]
+            resp_num_vehicles = float(forecast_row["NumVehicles"]) if TARGET_COL != "NumVehicles" else predicted_val
+            resp_avg_speed = float(forecast_row["AvgSpeed"]) if TARGET_COL != "AvgSpeed" else predicted_val
+            resp_occupancy = float(forecast_row["Occupancy"])
+            resp_avg_density = float(forecast_row["AvgDensity"])
+            resp_avg_headway = float(forecast_row["AvgHeadway"])
+            resp_flow_rate = float(forecast_row["FlowRate"])
+            resp_confidence = float(forecast_row["MeanConfidence"])
+        else:
+            resp_num_vehicles = float(obs.get("NumVehicles", 0.0)) if TARGET_COL != "NumVehicles" else predicted_val
+            resp_avg_speed = float(obs.get("AvgSpeed", 0.0)) if TARGET_COL != "AvgSpeed" else predicted_val
+            resp_occupancy = float(obs.get("Occupancy", 0.0))
+            resp_avg_density = float(obs.get("AvgDensity", 0.0))
+            resp_avg_headway = float(obs.get("AvgHeadway", 0.0))
+            resp_flow_rate = float(obs.get("FlowRate", 0.0))
+            resp_confidence = float(obs.get("MeanConfidence", 0.0))
 
-    forecast_point = NodeForecastPoint(
-        Time=forecast_time,
-        NumVehicles=round(resp_num_vehicles, 1),
-        AvgSpeed=round(resp_avg_speed, 2),
-        Occupancy=round(resp_occupancy, 2),
-        AvgDensity=round(resp_avg_density, 2),
-        AvgHeadway=round(resp_avg_headway, 2),
-        FlowRate=round(resp_flow_rate, 2),
-        Confidence=round(resp_confidence, 2)
-    )
+        forecast_points.append(NodeForecastPoint(
+            Time=forecast_time,
+            NumVehicles=round(resp_num_vehicles, 1),
+            AvgSpeed=round(resp_avg_speed, 2),
+            Occupancy=round(resp_occupancy, 2),
+            AvgDensity=round(resp_avg_density, 2),
+            AvgHeadway=round(resp_avg_headway, 2),
+            FlowRate=round(resp_flow_rate, 2),
+            Confidence=round(resp_confidence, 2)
+        ))
 
     db_metrics = device_metrics_map.get(node_id, {"mae": 0.0, "rmse": 0.0, "mape": 0.0, "r2": 0.0})
     metrics = {
@@ -493,10 +498,8 @@ async def forecast_node(node_id: str, request: NodeForecastRequest):
         "R2": round(db_metrics.get("r2", 0.0), 3),
     }
 
-    print(forecast_point)
-
     return NodeForecastResponse(
-        Forecast=forecast_point,
+        Forecast=forecast_points,
         Metrics=metrics
     )
 
