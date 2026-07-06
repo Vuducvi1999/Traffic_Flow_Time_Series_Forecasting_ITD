@@ -4,6 +4,7 @@ os.environ["OMP_NUM_THREADS"] = "1"
 os.environ["MKL_NUM_THREADS"] = "1"
 os.environ["OPENBLAS_NUM_THREADS"] = "1"
 
+import ast
 import json
 import logging
 import sys
@@ -13,6 +14,7 @@ import pandas as pd
 import statsmodels.api as sm
 import joblib
 from tqdm import tqdm
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from prepare_forecasting_dataset import is_vietnam_holiday
 
 # Configure logging
@@ -33,9 +35,7 @@ def process_single_device(task_args):
     
     target_col = "NumVehicles"
     base_traffic_features = [
-        "AvgSpeed", "Occupancy", "AvgDensity", "AvgHeadway", "FlowRate",
-        "AvgTravelTime", "MedianSpeed", "SpeedStd", "MeanConfidence",
-        "CarCount", "TruckCount", "BusCount", "MotorcycleCount", "OtherVehicleCount",
+        "AvgSpeed", "Occupancy", "AvgDensity",
         "Rain", "Temperature", "Humidity", "Visibility", "WindSpeed"
     ]
     
@@ -45,67 +45,79 @@ def process_single_device(task_args):
     # Group by BucketTime and take mean if there are multiple lanes (to aggregate to device-level)
     device_numeric_cols = [target_col] + base_traffic_features
     df_device_agg = df_device.groupby("BucketTime")[device_numeric_cols].mean().reset_index()
-    df_device_agg = df_device_agg.set_index("BucketTime").asfreq("1min")
-    
-    # Extract calendar features
-    df_device_agg["Hour"] = df_device_agg.index.hour
-    df_device_agg["DayOfWeek"] = df_device_agg.index.dayofweek
-    df_device_agg["IsWeekend"] = (df_device_agg.index.dayofweek >= 5).astype(int)
-    df_device_agg["IsHoliday"] = is_vietnam_holiday(pd.Series(df_device_agg.index)).values
+    df_device_agg = df_device_agg.set_index("BucketTime").asfreq("5min")
     
     # Create lag-1 features
     for col in base_traffic_features:
         df_device_agg[f"{col}_lag1"] = df_device_agg[col].shift(1)
         
-    df_device_agg = df_device_agg.bfill().ffill().fillna(0)
+    # Hour and DayOfWeek dummies
+    hour_dummies = pd.get_dummies(df_device_agg.index.hour, prefix="Hour", drop_first=True, dtype=int)
+    hour_dummies.index = df_device_agg.index
+    dow_dummies = pd.get_dummies(df_device_agg.index.dayofweek, prefix="DoW", drop_first=True, dtype=int)
+    dow_dummies.index = df_device_agg.index
     
-    exog_cols = [f"{col}_lag1" for col in base_traffic_features] + [
-        "Hour", "DayOfWeek", "IsWeekend", "IsHoliday"
-    ]
+    df_device_agg = pd.concat([df_device_agg, hour_dummies, dow_dummies], axis=1)
+    df_device_agg = df_device_agg.bfill().ffill().fillna(0)
+    df_device_agg["IsHoliday"] = is_vietnam_holiday(pd.Series(df_device_agg.index)).values
+    
+    exog_names = [f"{col}_lag1" for col in base_traffic_features] + [
+        "IsHoliday"
+    ] + hour_dummies.columns.tolist() + dow_dummies.columns.tolist()
     
     y = df_device_agg[target_col]
-    X = df_device_agg[exog_cols]
+    X = df_device_agg[exog_names].astype(float)
     
-    # 1. Validation Mode Setup: Split into train/test (last 120 mins is test set)
-    test_length = 120
+    # 1. Validation Mode Setup: Split into train/test (last 120 mins is test set - 24 steps of 5-min)
+    test_length = 24
     train_y = y.iloc[:-test_length]
     test_y = y.iloc[-test_length:]
     test_X = X.iloc[-test_length:]
     
     # Load model pre-trained on train split (excluding last 60 mins)
-    model_save_path = ROOT / "data" / "processed" / "models" / f"model_{device_id}.joblib"
+    model_save_path = ROOT / "data" / "processed" / "models" / f"model_{target_col}_{device_id}.joblib"
     results = joblib.load(model_save_path)
     
-    # Run test set forecast
-    test_forecast = results.forecast(steps=test_length, exog=test_X).clip(lower=0)
+    # Run test set forecast (align exog names)
+    test_exog = test_X.reindex(columns=results.model.exog_names, fill_value=0).astype(float)
+    test_forecast = results.forecast(steps=test_length, exog=test_exog).clip(lower=0)
     
-    # 2. Future Mode Setup: Fit SARIMAX on full history
+    # 2. Future Mode Setup: Fit SARIMAX on full history (with trend='c')
     full_model = sm.tsa.statespace.SARIMAX(
         y,
         exog=X,
         order=order,
         seasonal_order=seasonal_order,
+        trend='c',
         enforce_stationarity=False,
         enforce_invertibility=False
     )
     full_results = full_model.fit(disp=False, maxiter=50)
     
-    # Generate X_future for next 120 minutes
+    # Generate X_future for next 120 minutes (24 steps of 5-min)
     last_exog = X.iloc[-1:]
-    X_future = pd.concat([last_exog] * 120, ignore_index=True)
-    future_index = pd.date_range(start=y.index[-1] + pd.Timedelta("1min"), periods=120, freq="1min")
-    X_future.index = future_index
-    X_future["Hour"] = X_future.index.hour
-    X_future["DayOfWeek"] = X_future.index.dayofweek
-    X_future["IsWeekend"] = X_future.index.dayofweek.isin([5, 6]).astype(int)
-    X_future["IsHoliday"] = is_vietnam_holiday(pd.Series(X_future.index)).values
+    X_future_df = pd.concat([last_exog] * 24, ignore_index=True)
+    future_index = pd.date_range(start=y.index[-1] + pd.Timedelta("5min"), periods=24, freq="5min")
+    X_future_df.index = future_index
+    
+    # Drop old dummy columns and concat the new ones for the future steps
+    future_hour_dummies = pd.get_dummies(future_index.hour, prefix="Hour", drop_first=True, dtype=int)
+    future_hour_dummies.index = future_index
+    future_dow_dummies = pd.get_dummies(future_index.dayofweek, prefix="DoW", drop_first=True, dtype=int)
+    future_dow_dummies.index = future_index
+    
+    cols_to_drop = [c for c in X_future_df.columns if "Hour_" in c or "DoW_" in c]
+    X_future_df = X_future_df.drop(columns=cols_to_drop, errors="ignore")
+    X_future_df = pd.concat([X_future_df, future_hour_dummies, future_dow_dummies], axis=1)
+    X_future_df["IsHoliday"] = is_vietnam_holiday(pd.Series(X_future_df.index)).values
+    X_future = X_future_df.reindex(columns=full_results.model.exog_names, fill_value=0).astype(float)
     
     # Future forecast
-    future_forecast = full_results.forecast(steps=120, exog=X_future).clip(lower=0)
+    future_forecast = full_results.forecast(steps=24, exog=X_future).clip(lower=0)
     
     # 3. Format Data Outputs
-    # A. History list for validation (last 120 minutes of train_y)
-    history_df = df_device_agg.iloc[:-test_length].tail(120)
+    # A. History list for validation (last 120 minutes of train_y - 24 steps)
+    history_df = df_device_agg.iloc[:-test_length].tail(24)
     history_list = []
     for time_idx, row_val in history_df.iterrows():
         history_list.append({
@@ -118,7 +130,7 @@ def process_single_device(task_args):
             "vis": float(row_val["Visibility"])
         })
         
-    # B. Test Set actuals (60 minutes)
+    # B. Test Set actuals (120 minutes)
     test_actual_df = df_device_agg.tail(test_length)
     test_actual_list = []
     for time_idx, row_val in test_actual_df.iterrows():
@@ -132,7 +144,7 @@ def process_single_device(task_args):
             "vis": float(row_val["Visibility"])
         })
         
-    # C. Test Set predictions (60 minutes)
+    # C. Test Set predictions (120 minutes)
     test_predict_list = []
     for time_idx, val in test_forecast.items():
         test_predict_list.append({
@@ -141,7 +153,7 @@ def process_single_device(task_args):
         })
         
     # D. Future History list (last 120 minutes of full dataset)
-    future_history_df = df_device_agg.tail(120)
+    future_history_df = df_device_agg.tail(24)
     future_history_list = []
     for time_idx, row_val in future_history_df.iterrows():
         future_history_list.append({
@@ -154,7 +166,7 @@ def process_single_device(task_args):
             "vis": float(row_val["Visibility"])
         })
         
-    # E. Future predictions (60 minutes)
+    # E. Future predictions (120 minutes)
     future_forecast_list = []
     for time_idx, val in future_forecast.items():
         future_forecast_list.append({
@@ -163,12 +175,18 @@ def process_single_device(task_args):
         })
         
     # Specific horizons (extracted from future forecast)
+    # The dashboard expects predictions at 1m, 5m, 15m, 30m, 60m horizons.
+    # Since our frequency is 5-min:
+    # - 1m and 5m -> index 0 (5 minutes ahead)
+    # - 15m -> index 2 (15 minutes ahead)
+    # - 30m -> index 5 (30 minutes ahead)
+    # - 60m -> index 11 (60 minutes ahead)
     horizons = {
         "1m": float(future_forecast.iloc[0]),
-        "5m": float(future_forecast.iloc[4]),
-        "15m": float(future_forecast.iloc[14]),
-        "30m": float(future_forecast.iloc[29]),
-        "60m": float(future_forecast.iloc[59])
+        "5m": float(future_forecast.iloc[0]),
+        "15m": float(future_forecast.iloc[2]),
+        "30m": float(future_forecast.iloc[5]),
+        "60m": float(future_forecast.iloc[11])
     }
     
     device_data = {
@@ -184,6 +202,8 @@ def process_single_device(task_args):
 
 def main():
     logger.info("Starting Parallel Validation Exporter...")
+    
+    target_col = "NumVehicles"
     
     # 1. Load traffic data
     if not CSV_PATH.exists():
@@ -205,16 +225,17 @@ def main():
     for device_id in devices:
         df_device = df[df["DeviceId"] == device_id].copy()
         
-        # Load best model orders from metrics table
-        device_metrics = metrics_df[metrics_df["DeviceId"] == device_id]
+        # Load best model orders from metrics table (filtering by TargetCol)
+        device_metrics = metrics_df[(metrics_df["DeviceId"] == device_id) & (metrics_df["TargetCol"] == target_col)]
         if device_metrics.empty:
             order = (1, 0, 0)
             seasonal_order = (0, 0, 0, 0)
-            metrics_summary = {"mae": 15.0, "rmse": 25.0, "mape": 25.0, "r2": 0.1}
+            metrics_summary = {"mae": 50.0, "rmse": 70.0, "mape": 20.0, "r2": 0.1}
         else:
             row = device_metrics.iloc[0]
-            order = eval(row["SARIMAX_Order"])
-            seasonal_order = eval(row["Seasonal_Order"])
+            # Orders are saved as Python tuple strings like "(1, 0, 0)" — use ast.literal_eval
+            order = tuple(ast.literal_eval(row["SARIMAX_Order"])) if isinstance(row["SARIMAX_Order"], str) else tuple(row["SARIMAX_Order"])
+            seasonal_order = tuple(ast.literal_eval(row["Seasonal_Order"])) if isinstance(row["Seasonal_Order"], str) else tuple(row["Seasonal_Order"])
             metrics_summary = {
                 "mae": float(row["MAE"]),
                 "rmse": float(row["RMSE"]),

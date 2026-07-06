@@ -34,12 +34,15 @@ METRICS_PATH = ROOT / "data" / "processed" / "models" / "sarimax_evaluation_metr
 MODEL_DIR = ROOT / "data" / "processed" / "models"
 
 BASE_TRAFFIC_FEATURES = [
-    "AvgSpeed", "Occupancy", "AvgDensity", "AvgHeadway", "FlowRate",
+    "NumVehicles", "Occupancy", "AvgDensity", "AvgHeadway", "FlowRate",
     "AvgTravelTime", "MedianSpeed", "SpeedStd", "MeanConfidence",
-    "CarCount", "TruckCount", "BusCount", "MotorcycleCount", "OtherVehicleCount",
     "Rain", "Temperature", "Humidity", "Visibility", "WindSpeed",
+    "NumVehicles_roll_mean_15m", "NumVehicles_roll_std_15m",
+    "NumVehicles_roll_mean_30m", "NumVehicles_roll_std_30m",
+    "AvgSpeed_roll_mean_15m", "AvgSpeed_roll_std_15m",
+    "AvgSpeed_roll_mean_30m", "AvgSpeed_roll_std_30m",
 ]
-TARGET_COL = "NumVehicles"
+TARGET_COL = "AvgSpeed"
 
 # ── Global state (set during startup) ────────────────────────────────────────
 df: pd.DataFrame = None
@@ -66,7 +69,7 @@ def prepare_device_data(device_id: str) -> pd.DataFrame:
 
     numeric_cols = [TARGET_COL] + BASE_TRAFFIC_FEATURES
     agg = df_dev.groupby("BucketTime")[numeric_cols].mean().reset_index()
-    agg = agg.set_index("BucketTime").asfreq("1min")
+    agg = agg.set_index("BucketTime").asfreq("5min")
 
     agg["Hour"] = agg.index.hour
     agg["DayOfWeek"] = agg.index.dayofweek
@@ -106,11 +109,6 @@ class TrafficObservation(BaseModel):
     MedianSpeed: float = 0
     SpeedStd: float = 0
     MeanConfidence: float = 0
-    CarCount: float = 0
-    TruckCount: float = 0
-    BusCount: float = 0
-    MotorcycleCount: float = 0
-    OtherVehicleCount: float = 0
     Rain: float = 0
     Temperature: float = 0
     Humidity: float = 0
@@ -147,6 +145,44 @@ class ExtendResponse(BaseModel):
     model_updated_at: str
 
 
+class NodeTrafficObservation(BaseModel):
+    NumVehicles: float = 0
+    AvgSpeed: float = 0
+    Occupancy: float = 0
+    AvgDensity: float = 0
+    AvgHeadway: float = 0
+    FlowRate: float = 0
+    Confidence: float = 0
+    Rain: float = 0
+    Temperature: float = 0
+    Humidity: float = 0
+    Visibility: float = 0
+    WindSpeed: float = 0
+
+
+class NodeForecastRequest(BaseModel):
+    Horizon: int = Field(default=60, ge=1, le=1440, description="Number of minutes to forecast")
+    CurrentObservation: Optional[NodeTrafficObservation] = Field(default=None, description="Current traffic measurements. If omitted, the last row from the dataset is used.")
+    ObservationTime: Optional[str] = Field(default=None, description="ISO timestamp of the observation. If omitted, uses the last dataset timestamp + 1min.")
+
+
+class NodeForecastPoint(BaseModel):
+    Time: str
+    NumVehicles: float
+    AvgSpeed: float
+    Occupancy: float
+    AvgDensity: float
+    AvgHeadway: float
+    FlowRate: float
+    Confidence: float
+
+
+class NodeForecastResponse(BaseModel):
+    Forecast: NodeForecastPoint
+    Metrics: Dict[str, float]
+
+
+
 # ── FastAPI app ──────────────────────────────────────────────────────────────
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -173,7 +209,7 @@ async def lifespan(app: FastAPI):
     logger.info("Loading models and aggregating device data...")
     device_ids = df["DeviceId"].unique()
     for device_id in device_ids:
-        model_path = MODEL_DIR / f"model_{device_id}.joblib"
+        model_path = MODEL_DIR / f"model_{TARGET_COL}_{device_id}.joblib"
         if model_path.exists():
             try:
                 models[device_id] = joblib.load(model_path)
@@ -280,9 +316,9 @@ async def forecast(device_id: str, request: ForecastRequest):
     })
     obs_exog = compute_exog_row(obs_row)
 
-    forecast_start = obs_ts + pd.Timedelta("1min")
-    forecast_end = obs_ts + pd.Timedelta(minutes=request.horizon)
-    future_index = pd.date_range(start=forecast_start, end=forecast_end, freq="1min")
+    steps = request.horizon // 5
+    forecast_start = obs_ts + pd.Timedelta("5min")
+    future_index = pd.date_range(start=forecast_start, periods=steps, freq="5min")
 
     # Build future exogenous data
     X_future_list = []
@@ -300,12 +336,12 @@ async def forecast(device_id: str, request: ForecastRequest):
             endog=pd.Series([obs[TARGET_COL]], index=[obs_ts]),
             exog=pd.DataFrame([obs_exog], index=[obs_ts]),
         )
-        forecast_result = extended.forecast(steps=request.horizon, exog=X_future).clip(lower=0)
+        forecast_result = extended.forecast(steps=steps, exog=X_future).clip(lower=0)
     except Exception as e:
         # Fallback: try get_prediction on the original model
         try:
             start_idx = len(agg) - agg.index.get_indexer([obs_ts], method="nearest")[0]
-            pred = model.get_prediction(start=start_idx + 1, end=start_idx + request.horizon, exog=X_future)
+            pred = model.get_prediction(start=start_idx + 1, end=start_idx + steps, exog=X_future)
             forecast_result = pred.predicted_mean.clip(lower=0)
         except Exception as e2:
             raise HTTPException(500, f"Forecast failed: {e} / {e2}")
@@ -336,8 +372,135 @@ async def forecast(device_id: str, request: ForecastRequest):
     }
 
 
+@app.post("/api/nodes/{node_id}/forecast", response_model=NodeForecastResponse)
+async def forecast_node(node_id: str, request: NodeForecastRequest):
+    if node_id not in models:
+        raise HTTPException(404, f"Node '{node_id}' not found")
+
+    model = models[node_id]
+    agg = device_agg_data[node_id]
+
+    # Determine current time and observation
+    if request.CurrentObservation is not None:
+        obs = request.CurrentObservation.model_dump()
+        # Map Confidence to MeanConfidence
+        if "Confidence" in obs:
+            obs["MeanConfidence"] = obs.pop("Confidence")
+        
+        if request.ObservationTime:
+            current_time = pd.Timestamp(request.ObservationTime)
+        else:
+            current_time = agg.index[-1] + pd.Timedelta("1min")
+    else:
+        current_time = agg.index[-1]
+        obs = agg.loc[current_time].to_dict()
+
+    # Fill in any missing columns using historical last row or defaults
+    last_row = agg.iloc[-1]
+    for col in BASE_TRAFFIC_FEATURES:
+        if col not in obs:
+            if col == "MeanConfidence" and "Confidence" in obs:
+                obs["MeanConfidence"] = obs["Confidence"]
+            elif col == "MedianSpeed" and "AvgSpeed" in obs:
+                obs["MedianSpeed"] = obs["AvgSpeed"]
+            elif col in last_row:
+                obs[col] = last_row[col]
+            else:
+                obs[col] = 0.0
+
+    # Build observation row
+    obs_ts = pd.Timestamp(current_time) if not isinstance(current_time, pd.Timestamp) else current_time
+    obs_row = pd.Series({
+        **obs,
+        "Hour": obs_ts.hour,
+        "DayOfWeek": obs_ts.dayofweek,
+        "IsWeekend": int(obs_ts.dayofweek >= 5),
+        "IsHoliday": is_vietnam_holiday(pd.Series([obs_ts])).values[0],
+    })
+    obs_exog = compute_exog_row(obs_row)
+
+    steps = request.Horizon // 5
+    forecast_start = obs_ts + pd.Timedelta("5min")
+    future_index = pd.date_range(start=forecast_start, periods=steps, freq="5min")
+
+    # Build future exogenous data
+    X_future_list = []
+    for f_t in future_index:
+        if f_t in agg.index:
+            row = agg.loc[f_t]
+        else:
+            row = obs_row
+        X_future_list.append(compute_exog_row(row))
+    X_future = pd.DataFrame(X_future_list, index=future_index)
+
+    # Extend model then forecast
+    try:
+        extended = model.extend(
+            endog=pd.Series([obs[TARGET_COL]], index=[obs_ts]),
+            exog=pd.DataFrame([obs_exog], index=[obs_ts]),
+        )
+        forecast_result = extended.forecast(steps=steps, exog=X_future).clip(lower=0)
+    except Exception as e:
+        try:
+            start_idx = len(agg) - agg.index.get_indexer([obs_ts], method="nearest")[0]
+            pred = model.get_prediction(start=start_idx + 1, end=start_idx + steps, exog=X_future)
+            forecast_result = pred.predicted_mean.clip(lower=0)
+        except Exception as e2:
+            raise HTTPException(500, f"Forecast failed: {e} / {e2}")
+
+    forecast_result.index = future_index
+    predicted_val = float(forecast_result.iloc[0])
+
+    # Build forecast point
+    forecast_time = obs_ts + pd.Timedelta("5min")
+    
+    # Retrieve forecast exogenous values from database at that minute if available, else fall back to request inputs
+    if forecast_time in agg.index:
+        forecast_row = agg.loc[forecast_time]
+        resp_num_vehicles = float(forecast_row["NumVehicles"]) if TARGET_COL != "NumVehicles" else predicted_val
+        resp_avg_speed = float(forecast_row["AvgSpeed"]) if TARGET_COL != "AvgSpeed" else predicted_val
+        resp_occupancy = float(forecast_row["Occupancy"])
+        resp_avg_density = float(forecast_row["AvgDensity"])
+        resp_avg_headway = float(forecast_row["AvgHeadway"])
+        resp_flow_rate = float(forecast_row["FlowRate"])
+        resp_confidence = float(forecast_row["MeanConfidence"])
+    else:
+        resp_num_vehicles = float(obs.get("NumVehicles", 0.0)) if TARGET_COL != "NumVehicles" else predicted_val
+        resp_avg_speed = float(obs.get("AvgSpeed", 0.0)) if TARGET_COL != "AvgSpeed" else predicted_val
+        resp_occupancy = float(obs.get("Occupancy", 0.0))
+        resp_avg_density = float(obs.get("AvgDensity", 0.0))
+        resp_avg_headway = float(obs.get("AvgHeadway", 0.0))
+        resp_flow_rate = float(obs.get("FlowRate", 0.0))
+        resp_confidence = float(obs.get("MeanConfidence", 0.0))
+
+    forecast_point = NodeForecastPoint(
+        Time=forecast_time.strftime("%Y-%m-%d %H:%M"),
+        NumVehicles=round(resp_num_vehicles, 1),
+        AvgSpeed=round(resp_avg_speed, 2),
+        Occupancy=round(resp_occupancy, 2),
+        AvgDensity=round(resp_avg_density, 2),
+        AvgHeadway=round(resp_avg_headway, 2),
+        FlowRate=round(resp_flow_rate, 2),
+        Confidence=round(resp_confidence, 2)
+    )
+
+    db_metrics = device_metrics_map.get(node_id, {"mae": 0.0, "rmse": 0.0, "mape": 0.0, "r2": 0.0})
+    metrics = {
+        "Mae": round(db_metrics.get("mae", 0.0), 2),
+        "Rmse": round(db_metrics.get("rmse", 0.0), 2),
+        "Mape": round(db_metrics.get("mape", 0.0), 2),
+        "R2": round(db_metrics.get("r2", 0.0), 3),
+    }
+
+    return NodeForecastResponse(
+        Forecast=forecast_point,
+        Metrics=metrics
+    )
+
+
 @app.post("/api/devices/{device_id}/extend", response_model=ExtendResponse)
 async def extend_model(device_id: str, request: ExtendRequest):
+
     if device_id not in models:
         raise HTTPException(404, f"Device '{device_id}' not found")
 

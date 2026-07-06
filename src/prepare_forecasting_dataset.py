@@ -34,10 +34,10 @@ CLASS_MAPPING_NOTE = (
     "when an authoritative VehicleClass enum is available."
 )
 
-# The traffic CSV contains IntervalType values 1/5/15. The requested final schema does not include
-# IntervalType, so the script keeps one bucket frequency. IntervalType=1 is used by default because
-# Vehicle.BucketTime is minute-level and this preserves the highest available time resolution.
-TRAFFIC_INTERVAL_TYPE = 1
+# The traffic CSV contains IntervalType values 1/5/15.
+# IntervalType=5 is used because it matches the 5-minute forecasting resolution of the SARIMAX pipeline
+# and avoids double-counting from multiple sub-minute records per key.
+TRAFFIC_INTERVAL_TYPE = 5
 
 KEYS = ["BucketTime", "DeviceId", "Lane"]
 TRAFFIC_NUMERIC_COLS = [
@@ -84,6 +84,14 @@ FINAL_COLUMNS_WITH_OTHER = [
     "Humidity",
     "Visibility",
     "WindSpeed",
+    "NumVehicles_roll_mean_15m",
+    "NumVehicles_roll_std_15m",
+    "NumVehicles_roll_mean_30m",
+    "NumVehicles_roll_std_30m",
+    "AvgSpeed_roll_mean_15m",
+    "AvgSpeed_roll_std_15m",
+    "AvgSpeed_roll_mean_30m",
+    "AvgSpeed_roll_std_30m",
 ]
 
 # Exact column order from Step 4 of the prompt. Step 2 requested OtherVehicleCount, so the primary
@@ -199,14 +207,16 @@ def population_std(series: pd.Series) -> float:
 
 
 def aggregate_traffic_group(group: pd.DataFrame) -> pd.Series:
+    # Use mean for NumVehicles: IntervalType=5 records already represent 5-min counts;
+    # summing duplicate keys (same BucketTime+DeviceId+Lane) would double-count.
     return pd.Series(
         {
-            "NumVehicles": pd.to_numeric(group["NumVehicles"], errors="coerce").sum(min_count=1),
+            "NumVehicles": pd.to_numeric(group["NumVehicles"], errors="coerce").mean(),
             "AvgSpeed": weighted_average(group, "AvgSpeed"),
             "Occupancy": weighted_average(group, "Occupancy"),
             "AvgDensity": weighted_average(group, "AvgDensity"),
             "AvgHeadway": weighted_average(group, "AvgHeadway"),
-            "FlowRate": pd.to_numeric(group["FlowRate"], errors="coerce").sum(min_count=1),
+            "FlowRate": pd.to_numeric(group["FlowRate"], errors="coerce").mean(),
             "TrafficRowsInKey": len(group),
         }
     )
@@ -469,12 +479,12 @@ def build_final_dataset() -> Tuple[pd.DataFrame, Dict[str, object]]:
     # Calculate global hourly profiles (fallback if a specific device/lane/hour is completely empty)
     global_hourly_profile = observed.groupby("Hour")[profile_cols].mean().reset_index()
 
-    # 2. Generate the complete continuous 1-minute grid
+    # 2. Generate the complete continuous 5-minute grid (matches SARIMAX pipeline resolution)
     devices = traffic["DeviceId"].unique()
     lanes = traffic["Lane"].unique()
-    min_time = traffic["BucketTime"].min()
-    max_time = traffic["BucketTime"].max()
-    time_index = pd.date_range(start=min_time, end=max_time, freq="1min")
+    min_time = traffic["BucketTime"].min().floor("5min")
+    max_time = traffic["BucketTime"].max().floor("5min")
+    time_index = pd.date_range(start=min_time, end=max_time, freq="5min")
 
     grid = pd.MultiIndex.from_product(
         [devices, lanes, time_index],
@@ -526,9 +536,9 @@ def build_final_dataset() -> Tuple[pd.DataFrame, Dict[str, object]]:
     # Track observed points before interpolation
     obs_mask = joined["NumVehicles"].notna()
     
-    # Linearly interpolate gaps <= 60 minutes for each device and lane
+    # Linearly interpolate gaps <= 12 steps (= 60 minutes at 5-min resolution) for each device and lane
     joined[profile_cols] = joined.groupby(["DeviceId", "Lane"])[profile_cols].transform(
-        lambda s: s.interpolate(method="linear", limit=60, limit_direction="both")
+        lambda s: s.interpolate(method="linear", limit=12, limit_direction="both")
     )
     
     # Track interpolated points and profile-filled points
@@ -564,8 +574,8 @@ def build_final_dataset() -> Tuple[pd.DataFrame, Dict[str, object]]:
     # Aggregate weather by BucketTime (mean across all reporting stations)
     weather_agg = weather_df.groupby("BucketTime")[weather_cols].mean().reset_index()
     
-    # Create complete 1-minute time grid for the weather alignment
-    weather_time_index = pd.date_range(start=min_time, end=max_time, freq="1min")
+    # Create complete 5-minute time grid for the weather alignment (matches traffic grid)
+    weather_time_index = pd.date_range(start=min_time, end=max_time, freq="5min")
     weather_grid = pd.DataFrame({"BucketTime": weather_time_index})
     weather_agg = weather_grid.merge(weather_agg, on="BucketTime", how="left")
     
@@ -586,7 +596,7 @@ def build_final_dataset() -> Tuple[pd.DataFrame, Dict[str, object]]:
     final = final.merge(weather_agg, on="BucketTime", how="left")
     # ----------------------------------------
 
-    final = final[FINAL_COLUMNS_WITH_OTHER].copy()
+    final = final[[c for c in FINAL_COLUMNS_WITH_OTHER if "roll" not in c]].copy()
     
     # Sort final dataset by BucketTime first, then DeviceId, then Lane (interleaving devices)
     final = final.sort_values(["BucketTime", "DeviceId", "Lane"]).reset_index(drop=True)
@@ -594,10 +604,10 @@ def build_final_dataset() -> Tuple[pd.DataFrame, Dict[str, object]]:
     # Ensure vehicle counts are integers and sum to NumVehicles using the Largest Remainder Method (LRM)
     total = final["NumVehicles"].round().astype("int64").to_numpy()
     
-    r_car = final["CarRatio"].to_numpy()
-    r_truck = final["TruckRatio"].to_numpy()
-    r_bus = final["BusRatio"].to_numpy()
-    r_moto = final["MotorcycleRatio"].to_numpy()
+    r_car = final["CarRatio"].to_numpy().copy()
+    r_truck = final["TruckRatio"].to_numpy().copy()
+    r_bus = final["BusRatio"].to_numpy().copy()
+    r_moto = final["MotorcycleRatio"].to_numpy().copy()
     r_other = np.clip(1.0 - (r_car + r_truck + r_bus + r_moto), 0.0, 1.0)
 
     # Normalize ratios to sum to 1 per row
@@ -661,6 +671,67 @@ def build_final_dataset() -> Tuple[pd.DataFrame, Dict[str, object]]:
     final["BusRatio"] = np.where(total > 0, final["BusCount"] / total, 0.0)
     final["MotorcycleRatio"] = np.where(total > 0, final["MotorcycleCount"] / total, 0.0)
 
+    # === Method 1: Resample to 5-minute frequency ===
+    final = final.sort_values(by=["DeviceId", "Lane", "BucketTime"])
+    agg_dict = {
+        "NumVehicles": "mean",
+        "FlowRate": "mean",
+        "CarCount": "mean",
+        "TruckCount": "mean",
+        "BusCount": "mean",
+        "MotorcycleCount": "mean",
+        "OtherVehicleCount": "mean",
+        
+        "AvgSpeed": "mean",
+        "Occupancy": "mean",
+        "AvgDensity": "mean",
+        "AvgHeadway": "mean",
+        "AvgTravelTime": "mean",
+        "MedianSpeed": "mean",
+        "SpeedStd": "mean",
+        "MeanConfidence": "mean",
+        
+        "Rain": "mean",
+        "Temperature": "mean",
+        "Humidity": "mean",
+        "Visibility": "mean",
+        "WindSpeed": "mean",
+    }
+    
+    resampled_list = []
+    for (device_id, lane), group in final.groupby(["DeviceId", "Lane"]):
+        group_res = group.set_index("BucketTime").resample("5min").agg(agg_dict)
+        group_res["DeviceId"] = device_id
+        group_res["Lane"] = lane
+        group_res = group_res.reset_index()
+        resampled_list.append(group_res)
+        
+    final = pd.concat(resampled_list, ignore_index=True)
+    
+    # Recompute ratio columns
+    total_res = final["NumVehicles"]
+    final["CarRatio"] = np.where(total_res > 0, final["CarCount"] / total_res, 0.0)
+    final["TruckRatio"] = np.where(total_res > 0, final["TruckCount"] / total_res, 0.0)
+    final["BusRatio"] = np.where(total_res > 0, final["BusCount"] / total_res, 0.0)
+    final["MotorcycleRatio"] = np.where(total_res > 0, final["MotorcycleCount"] / total_res, 0.0)
+    
+    # Recompute calendar features
+    final["Hour"] = final["BucketTime"].dt.hour
+    final["DayOfWeek"] = final["BucketTime"].dt.dayofweek
+    final["IsWeekend"] = (final["DayOfWeek"] >= 5).astype(int)
+    final["IsHoliday"] = is_vietnam_holiday(final["BucketTime"])
+    final["Day"] = final["BucketTime"].dt.day
+    final["Month"] = final["BucketTime"].dt.month
+
+    # === Method 2: Add Rolling features (15-min and 30-min windows) ===
+    final = final.sort_values(by=["DeviceId", "Lane", "BucketTime"])
+    rolling_cols = ["AvgSpeed", "NumVehicles"]
+    for col in rolling_cols:
+        final[f"{col}_roll_mean_15m"] = final.groupby(["DeviceId", "Lane"])[col].rolling(window=3, min_periods=1).mean().reset_index(level=[0, 1], drop=True)
+        final[f"{col}_roll_std_15m"] = final.groupby(["DeviceId", "Lane"])[col].rolling(window=3, min_periods=1).std().fillna(0).reset_index(level=[0, 1], drop=True)
+        final[f"{col}_roll_mean_30m"] = final.groupby(["DeviceId", "Lane"])[col].rolling(window=6, min_periods=1).mean().reset_index(level=[0, 1], drop=True)
+        final[f"{col}_roll_std_30m"] = final.groupby(["DeviceId", "Lane"])[col].rolling(window=6, min_periods=1).std().fillna(0).reset_index(level=[0, 1], drop=True)
+
     count_cols = ["CarCount", "TruckCount", "BusCount", "MotorcycleCount", "OtherVehicleCount"]
 
     old_fake_signature = (
@@ -707,6 +778,7 @@ def build_final_dataset() -> Tuple[pd.DataFrame, Dict[str, object]]:
         "missing_value_handling": missing_report,
         "validation": validation_report,
     }
+    final = final[FINAL_COLUMNS_WITH_OTHER].copy()
     return final, report
 
 

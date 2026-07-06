@@ -1,5 +1,5 @@
 # Hệ Thống Dự Báo Lưu Lượng Giao Thông VDS Sử Dụng SARIMAX
-(VDS Traffic Volume Forecasting System with SARIMAX, FastAPI & Streamlit)
+(VDS Traffic & Speed Forecasting System with SARIMAX, FastAPI & Streamlit)
 
 Hệ thống này cung cấp giải pháp toàn diện từ đầu đến cuối (End-to-End) nhằm xử lý dữ liệu cảm biến giao thông (VDS), phân loại phương tiện và dữ liệu thời tiết (WOS), huấn luyện các mô hình dự báo chuỗi thời gian SARIMAX, và triển khai dưới dạng dịch vụ API thời gian thực cùng giao diện giám sát trực quan.
 
@@ -7,9 +7,13 @@ Hệ thống này cung cấp giải pháp toàn diện từ đầu đến cuối
 
 ## Tính Năng Nổi Bật
 
-1. **Pipeline ETL mạnh mẽ**: Tự động đồng bộ và gom cụm dữ liệu giao thông theo chu kỳ 1 phút. Tạo lưới thời gian liên tục (Temporal Grid Expansion) và xử lý khuyết thiếu thông minh bằng nội suy tuyến tính (khoảng trống ngắn <= 60 phút) và cấu hình giờ lịch sử (Historical Profile Imputation cho khoảng trống lớn).
+1. **Pipeline ETL mạnh mẽ**: Tự động đồng bộ và gom cụm dữ liệu giao thông theo chu kỳ **5 phút** (khớp với tần suất thực tế của thiết bị cảm biến VDS để tránh sai lệch dữ liệu). Tạo lưới thời gian liên tục (Temporal Grid Expansion) và xử lý khuyết thiếu thông minh bằng nội suy tuyến tính (khoảng trống ngắn <= 12 bước - tương đương 60 phút) và cấu hình giờ lịch sử (Historical Profile Imputation cho khoảng trống lớn).
 2. **Chuẩn hóa Phân loại Xe**: Sử dụng Thuật toán số dư lớn nhất (Largest Remainder Method - LRM) giúp làm tròn số lượng xe của từng phân loại (Car, Truck, Bus, Motorcycle, Other) sao cho tổng của chúng luôn khớp chính xác 100% với tổng số xe quan trắc (NumVehicles).
-3. **Tránh Rò Rỉ Thông Tin (Mathematical Leakage)**: Tự động chuyển đổi các đặc trưng lưu lượng, tỷ lệ xe và thời tiết thành biến trễ (Lag-1) để làm đầu vào ngoại sinh (Exogenous) cho mô hình SARIMAX, đảm bảo tính thực tế khi chạy dự báo cuộn (rolling forecast).
+3. **Tránh Rò Rỉ Thông Tin (Mathematical Leakage) & Thiết Kế Bất Đối Xứng**: 
+   - Tự động chuyển đổi các đặc trưng lưu lượng, tỷ lệ xe và thời tiết thành biến trễ 1 bước (Lag-1 ứng với 5 phút) để làm đầu vào ngoại sinh (Exogenous) cho mô hình SARIMAX.
+   - **Cấu hình biến ngoại sinh bất đối xứng**:
+     - Mô hình dự báo `NumVehicles` sử dụng các biến ngoại sinh đầy đủ (AvgSpeed, Occupancy, AvgDensity, các biến thời tiết).
+     - Mô hình dự báo `AvgSpeed` chỉ sử dụng các biến ngoại sinh liên quan trực tiếp đến tốc độ và lưu thông vật lý (Occupancy, các biến thời tiết), loại bỏ `NumVehicles` và `AvgDensity` nhằm tăng tính chính xác, thực tế và tránh rò rỉ thông tin tương quan ngược.
 4. **Tối ưu hóa Tự động**: Tự động kiểm tra tính dừng bằng kiểm định Augmented Dickey-Fuller (ADF) để tìm bậc sai phân d tối ưu. Hỗ trợ tìm kiếm siêu tham số tối ưu thông qua auto_arima và lưu cấu hình riêng cho từng thiết bị VDS.
 5. **Dịch vụ API Cấp Công Nghiệp**: Xây dựng trên FastAPI kèm cơ chế cập nhật trạng thái cuộn thời gian thực thông qua API /extend. Đi kèm cổng Proxy Gateway bảo mật.
 6. **Dashboard Đối Chất Trực Quan**: Ứng dụng Streamlit cho phép người dùng lựa chọn bất kỳ mốc thời gian lịch sử nào để chạy mô phỏng đối chất song song (Backtest Simulator) giữa Thực tế diễn ra và Đường dự báo kèm khoảng tin cậy 95%.
@@ -21,39 +25,28 @@ Hệ thống này cung cấp giải pháp toàn diện từ đầu đến cuối
 ```text
 TS_ITD/
 ├── data/                            # Thư mục lưu trữ dữ liệu
-│   ├── raw/                         # Dữ liệu quan trắc thô đầu vào
-│   │   ├── iTMS_VDS_Traffic_202606290917.csv
-│   │   ├── iTMS_VDS_Vehicle_202606290919.csv
-│   │   └── iTMS_WOS_Raw_202606290934.csv
-│   └── processed/                   # Kết quả sau tiền xử lý & mô hình đã huấn luyện
-│       ├── traffic_vehicle_forecasting_dataset.csv
-│       ├── traffic_vehicle_forecasting_dataset_step4_columns.csv
-│       ├── traffic_vehicle_forecasting_dataset.parquet
-│       ├── preprocessing_report.json
-│       ├── preprocessing_report.md
-│       ├── vehicle_class_mapping_inferred.json
-│       ├── audit/
-│       │   ├── unmatched_traffic_rows.csv
-│       │   └── traffic_vehicle_join_diagnostics_by_date.csv
-│       └── models/
-│           ├── model_{device_id}.joblib
-│           ├── device_sarimax_config.json
-│           ├── sarimax_evaluation_metrics.csv
-│           ├── sarimax_optimization_results.csv
-│           └── plots/
-│               ├── forecast_{device_id}.png
-│               └── diagnostics_{device_id}.png
-│
-├── docs/                            # Tài liệu mô tả & hình ảnh giải thích
-│   ├── thông số vds.md
-│   ├── dashboard.html
-│   ├── explanation.gif
-│   └── charts/                      # Các biểu đồ phân tích thống kê dữ liệu
-│
-├── logs/                            # Nhật ký chạy tiến trình
-│   ├── sarimax_optimization.log
-│   └── sarimax_training.log
-│
+├── data/raw/                        # Dữ liệu quan trắc thô đầu vào
+│   ├── iTMS_VDS_Traffic_202606290917.csv
+│   ├── iTMS_VDS_Vehicle_202606290919.csv
+│   └── iTMS_WOS_Raw_202606290934.csv
+└── data/processed/                  # Kết quả sau tiền xử lý & mô hình đã huấn luyện
+    ├── traffic_vehicle_forecasting_dataset.csv
+    ├── traffic_vehicle_forecasting_dataset_step4_columns.csv
+    ├── traffic_vehicle_forecasting_dataset.parquet
+    ├── preprocessing_report.md
+    ├── vehicle_class_mapping_inferred.json
+    ├── audit/
+    │   ├── unmatched_traffic_rows.csv
+    │   └── traffic_vehicle_join_diagnostics_by_date.csv
+    └── models/
+        ├── model_{target_col}_{device_id}.joblib
+        ├── device_sarimax_config.json
+        ├── sarimax_evaluation_metrics.csv
+        ├── sarimax_coefficients.json
+        └── plots/
+            ├── forecast_{target_col}_{device_id}.png
+            └── diagnostics_{target_col}_{device_id}.png
+
 ├── src/                             # Mã nguồn Python chính
 │   ├── prepare_forecasting_dataset.py
 │   ├── optimize_sarimax.py
@@ -69,10 +62,6 @@ TS_ITD/
 │   │   └── requirements.txt
 │   │
 │   └── utils/                       # Các tập lệnh tiện ích bổ trợ
-│       ├── fetch_all_data.py
-│       ├── export_dashboard_data.py
-│       ├── generate_charts.py
-│       └── generate_explanation_gif.py
 │
 ├── requirements.txt                 # Tổng hợp tất cả các thư viện cần thiết ở cấp dự án
 └── README.md                        # Hướng dẫn sử dụng hệ thống
@@ -84,7 +73,7 @@ TS_ITD/
 
 ### Yêu cầu hệ thống
 * Python phiên bản 3.9 trở lên (Khuyến nghị 3.10 hoặc 3.11).
-* RAM tối thiểu: 8GB (khuyến nghị 16GB do kích thước tệp phương tiện VDS thô khá lớn).
+* RAM tối thiểu: 8GB (khuyến nghị 16GB).
 
 ### Bước 1: Khởi tạo môi trường ảo và cài đặt thư viện
 Mở cửa sổ dòng lệnh (Terminal/PowerShell) tại thư mục dự án và chạy:
@@ -108,29 +97,27 @@ pip install -r requirements.txt
 
 ### Bước 1: Tiền xử lý dữ liệu (ETL Pipeline)
 * **Thời gian thực thi dự kiến**: ~15 - 30 giây.
-* **Mô tả**: Kịch bản này sẽ gộp dữ liệu lưu lượng, phân loại phương tiện và thời tiết thô, thực hiện lưới hóa thời gian 1 phút, xử lý khuyết thiếu và áp dụng giải thuật chuẩn hóa phân bổ xe.
+* **Mô tả**: Gộp dữ liệu lưu lượng VDS, phân loại phương tiện và thời tiết thô, thực hiện lưới hóa thời gian 5 phút, xử lý khuyết thiếu và áp dụng giải thuật chuẩn hóa phân bổ xe (LRM).
 
 ```bash
 python src/prepare_forecasting_dataset.py
 ```
 * **Đầu ra**: 
   * Tệp dữ liệu sạch: [traffic_vehicle_forecasting_dataset.csv](file:///d:/2026/TS_ITD/data/processed/traffic_vehicle_forecasting_dataset.csv)
-  * Tệp báo cáo ETL: data/processed/preprocessing_report.json và data/processed/preprocessing_report.md.
+  * Tệp báo cáo ETL: [preprocessing_report.md](file:///d:/2026/TS_ITD/data/processed/preprocessing_report.md).
 
 ### Bước 2: Tối ưu hóa siêu tham số (Tùy chọn)
-* **Trạng thái**: Không bắt buộc (có hay không cũng được, có thể bỏ qua nếu muốn chạy nhanh).
-* **Thời gian thực thi dự kiến**: ~10 - 20 phút (tùy thuộc vào hiệu năng CPU khi tìm kiếm song song).
-* **Mô tả**: Chạy kịch bản tìm kiếm lưới để tìm bộ tham số (p, d, q) x (P, D, Q)s tối ưu cho từng trạm VDS cụ thể. Nếu bỏ qua bước này, Bước 3 sẽ tự động áp dụng cấu hình mặc định.
+* **Mô tả**: Chạy kịch bản tìm kiếm lưới để tìm bộ tham số (p, d, q) x (P, D, Q)s tối ưu cho từng trạm VDS cụ thể.
 
 ```bash
 # Sử dụng 4 luồng song song để tìm kiếm nhanh
-python src/optimize_sarimax.py --n-jobs 4
+python src/optimize_sarimax.py --n-jobs 4 --target NumVehicles
+python src/optimize_sarimax.py --n-jobs 4 --target AvgSpeed
 ```
 * **Đầu ra**: Tệp cấu hình lưu tham số tối ưu nhất cho mỗi trạm tại [device_sarimax_config.json](file:///d:/2026/TS_ITD/data/processed/models/device_sarimax_config.json).
 
 ### Bước 3: Huấn luyện mô hình SARIMAX
-* **Thời gian thực thi dự kiến**: ~1 - 3 phút (khi chạy ở chế độ test `--test-mode` chỉ mất ~1 - 2 giây).
-* **Mô tả**: Huấn luyện mô hình chính thức trên toàn bộ dữ liệu lịch sử bằng cấu hình tối ưu vừa tìm được ở Bước 2 (hoặc cấu hình mặc định nếu bỏ qua Bước 2).
+* **Mô tả**: Huấn luyện mô hình chính thức trên toàn bộ dữ liệu lịch sử bằng cấu hình tối ưu.
 
 ```bash
 # Chạy huấn luyện song song cho tất cả các thiết bị VDS
@@ -140,21 +127,12 @@ python src/train_sarimax.py --n-jobs -1
   * `--test-mode`: Chạy thử nghiệm nhanh (chỉ huấn luyện 2 trạm với lịch sử ngắn 300 dòng).
   * `--no-search`: Bỏ qua việc tìm kiếm tự động, ép buộc sử dụng cấu hình tĩnh từ tệp JSON.
 * **Đầu ra**:
-  * Các tệp mô hình đã huấn luyện: data/processed/models/model_{device_id}.joblib
-  * Bảng sai số đánh giá: data/processed/models/sarimax_evaluation_metrics.csv
-  * Biểu đồ trực quan hóa dự báo và phân tích phần dư tại thư mục data/processed/models/plots/.
+  * Các tệp mô hình đã huấn luyện: `data/processed/models/model_{target_col}_{device_id}.joblib`
+  * Bảng sai số đánh giá: [sarimax_evaluation_metrics.csv](file:///d:/2026/TS_ITD/data/processed/models/sarimax_evaluation_metrics.csv)
+  * Biểu đồ trực quan hóa dự báo và phân tích phần dư tại thư mục `data/processed/models/plots/`.
 
-### Bước 4: Kiểm chứng độ chính xác ngoại tuyến (Dòng lệnh)
-* **Thời gian thực thi dự kiến**: Thời gian thực tương tác (~1 - 2 giây).
-* **Mô tả**: Kiểm tra nhanh kết quả dự báo của một trạm bất kỳ thông qua giao diện dòng lệnh tương tác và xem biểu đồ vẽ bằng Matplotlib:
-
-```bash
-python src/test_accuracy.py
-```
-
-### Bước 5: Khởi chạy API Server & Proxy Gateway
-* **Thời gian khởi chạy dự kiến**: ~5 - 10 giây (do nạp các mô hình đã huấn luyện vào bộ nhớ).
-* **Mô tả**: Hệ thống sử dụng kiến trúc phân tách với một API gốc và một Proxy Gateway trung gian.
+### Bước 4: Khởi chạy API Server & Proxy Gateway
+Hệ thống sử dụng kiến trúc phân tách với một API gốc và một Proxy Gateway trung gian.
 
 1. **Khởi chạy API gốc (cổng 8001)**:
    ```bash
@@ -166,20 +144,16 @@ python src/test_accuracy.py
    cd src/gateway
    python main.py
    ```
-   * Mẹo: Bạn có thể cấu hình cổng và địa chỉ API gốc trong tệp src/gateway/.env.
 
-### Bước 6: Khởi chạy Streamlit Dashboard
-* **Thời gian khởi chạy dự kiến**: ~3 - 5 giây.
-* **Mô tả**: Khởi chạy giao diện web tương tác trực quan để phân tích, chạy mô phỏng đối chất song song:
-
+### Bước 5: Khởi chạy Streamlit Dashboard
 ```bash
 streamlit run src/streamlit_dashboard.py
 ```
-Trình duyệt sẽ tự động mở trang web tại địa chỉ http://localhost:8501.
+Trình duyệt sẽ tự động mở trang web tại địa chỉ `http://localhost:8501`.
 
 ---
 
-## Tài Liệu API Endpoints (Thông Qua Proxy Gateway - Cổng 8002)
+## Tài Liệu API Endpoints (Cổng 8001 / Cổng 8002)
 
 ### 1. Kiểm tra trạng thái hệ thống
 * **Endpoint**: `GET /api/health`
@@ -188,8 +162,8 @@ Trình duyệt sẽ tự động mở trang web tại địa chỉ http://localh
   ```json
   {
     "status": "ok",
-    "devices_loaded": 4,
-    "dataset_period": "2026-06-29 00:00:00 → 2026-06-29 09:17:00"
+    "devices_loaded": 24,
+    "dataset_period": "2026-06-19 01:55:00 → 2026-06-29 09:17:00"
   }
   ```
 
@@ -246,8 +220,8 @@ Trình duyệt sẽ tự động mở trang web tại địa chỉ http://localh
 
 ### 1. Mở Rộng Chỉ Mục Thời Gian & Điền Khuyết (Temporal Grid & Imputation)
 Trong các cảm biến giao thông thô, dữ liệu thường bị đứt quãng hoặc không gửi tín hiệu khi không có phương tiện. Để mô hình chuỗi thời gian hoạt động ổn định:
-* Hệ thống xây dựng một lưới thời gian liên tục (frequency='1min') cho mọi làn xe và thiết bị.
-* Khoảng trống <= 60 phút: Áp dụng nội suy tuyến tính (Linear Interpolation) để đảm bảo sự chuyển tiếp mượt mà của lưu lượng giao thông.
+* Hệ thống xây dựng một lưới thời gian liên tục (frequency='5min') cho mọi làn xe và thiết bị.
+* Khoảng trống <= 12 bước (tương đương 60 phút): Áp dụng nội suy tuyến tính (Linear Interpolation) để đảm bảo sự chuyển tiếp mượt mà của lưu lượng giao thông.
 * Khoảng trống > 60 phút: Điền bằng Hồ sơ giờ lịch sử (Hourly Profile Imputation) trung bình của chính làn/thiết bị đó vào khung giờ tương ứng, giúp bảo toàn tính chu kỳ ngày-đêm mà không sinh nhiễu ngẫu nhiên.
 
 ### 2. Thuật Toán Số Dư Lớn Nhất (Largest Remainder Method - LRM)
@@ -260,8 +234,8 @@ Hệ thống sử dụng giải thuật LRM:
 5. Tính toán lại cột tỷ lệ xe dựa trên số lượng xe nguyên đã chuẩn hóa để đảm bảo tính nhất quán dữ liệu 100%.
 
 ### 3. Biến Ngoại Sinh Lag-1 (Exogenous Lagging)
-Để loại bỏ sự rò rỉ thông tin toán học (mathematical leakage) khi tổng số lượng xe chi tiết bằng chính xác NumVehicles tại cùng một thời điểm quan trắc, tất cả đặc trưng động bao gồm cả tốc độ trung bình, mật độ, số lượng phân loại xe, và các biến thời tiết (nhiệt độ, lượng mưa) đều được dịch trễ 1 phút (shift(1)).
-* Do đó, dự báo lưu lượng tại phút t sẽ chỉ dựa trên dữ liệu lịch sử thực tế của các biến số này tại phút t-1, đảm bảo mô hình có thể triển khai dự báo tương lai thực tế.
+Để loại bỏ sự rò rỉ thông tin toán học (mathematical leakage) khi tổng số lượng xe chi tiết bằng chính xác NumVehicles tại cùng một thời điểm quan trắc, tất cả đặc trưng động bao gồm cả tốc độ trung bình, mật độ, số lượng phân loại xe, và các biến thời tiết (nhiệt độ, lượng mưa) đều được dịch trễ 1 bước (lùi 5 phút, tương ứng shift(1) trên lưới 5 phút).
+* Do đó, dự báo lưu lượng tại bước t sẽ chỉ dựa trên dữ liệu lịch sử thực tế của các biến số này tại bước t-1, đảm bảo mô hình có thể triển khai dự báo tương lai thực tế.
 
 ### 4. Đo Lường Vi Phân Gia Tốc (First & Second Differences)
 Để cung cấp cảnh báo ùn tắc sớm cho bộ phận điều hành giao thông, Dashboard Streamlit phân tích hai chỉ số vi phân tại mốc bắt đầu dự báo:
