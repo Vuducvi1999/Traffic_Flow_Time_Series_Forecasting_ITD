@@ -1,13 +1,10 @@
 @echo off
 cd /d "%~dp0"
 
-:: TÊN SERVICE (Bạn có thể đổi tùy ý)
 set SERVICE_NAME=FastApi_Traffic_Forecasting
+set NSSM_EXE="%~dp0nssm\win64\nssm.exe"
 
-:: KIỂM TRA: Nếu Service gọi file này, tham số %1 sẽ là "run"
-if "%1"=="run" goto :start_api_server
-
-:: Kiểm tra quyền Admin, nếu không có sẽ tự động đòi quyền Admin (Đã fix lỗi rỗng tham số trên PowerShell)
+:: Kiểm tra quyền Admin
 net session >nul 2>&1
 if %errorLevel% neq 0 (
     if "%1"=="" (
@@ -29,22 +26,19 @@ goto :eof
 
 :install_service
 echo Dang cai dat Service...
-sc create %SERVICE_NAME% binPath= "\"%~f0\" run" start= auto
-sc description %SERVICE_NAME% "Dich vu du bao luu luong giao thong FastAPI"
-sc start %SERVICE_NAME%
+
+%NSSM_EXE% install %SERVICE_NAME% "%~dp0.venv\Scripts\python.exe" "src/api_server.py"
+%NSSM_EXE% set %SERVICE_NAME% AppDirectory "%~dp0"
+%NSSM_EXE% set %SERVICE_NAME% Description "Dich vu du bao luu luong giao thong FastAPI"
+%NSSM_EXE% start %SERVICE_NAME%
 echo Cai dat va khoi dong thanh cong!
 pause
 goto :eof
 
 :uninstall_service
 echo Dang dung va xoa Service...
-sc stop %SERVICE_NAME% >nul 2>&1
-sc delete %SERVICE_NAME%
+%NSSM_EXE% stop %SERVICE_NAME% >nul 2>&1
+%NSSM_EXE% remove %SERVICE_NAME% confirm
 echo Da go bo Service thanh cong!
 pause
 goto :eof
-
-:start_api_server
-call .venv\Scripts\activate.bat
-
-python src/api_server.py
