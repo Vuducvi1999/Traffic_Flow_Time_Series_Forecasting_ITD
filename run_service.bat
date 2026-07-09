@@ -15,6 +15,15 @@ if %errorLevel% neq 0 (
     exit /b
 )
 
+
+if exist .venv (
+    echo .venv already exists. Skipping creation.
+) else (
+    echo Creating virtual environment...
+    uv venv .venv
+)
+
+
 echo 1. Cai dat va Khoi dong Service
 echo 2. Go bo (Delete) Service
 echo ===================================================
@@ -26,7 +35,6 @@ goto :eof
 
 :install_service
 echo Dang cai dat Service...
-
 %NSSM_EXE% install %SERVICE_NAME% "%~dp0.venv\Scripts\python.exe" "src/api_server.py"
 %NSSM_EXE% set %SERVICE_NAME% AppDirectory "%~dp0"
 %NSSM_EXE% set %SERVICE_NAME% Description "Dich vu du bao luu luong giao thong FastAPI"

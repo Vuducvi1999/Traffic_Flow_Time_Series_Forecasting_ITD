@@ -15,10 +15,10 @@ call .venv\Scripts\activate.bat
 uv pip install -r requirements.txt
 
 echo Preparing dataset...
-python -u src/prepare_forecasting_dataset.py
+python src/prepare_forecasting_dataset.py
 
 echo Training SARIMAX...
-python -u src/train_sarimax.py --n-jobs -1
+python src/train_sarimax.py --n-jobs -1
 
 echo Done.
 pause
